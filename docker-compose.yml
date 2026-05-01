@@ -1,0 +1,344 @@
+services:
+  # =========================
+  # REVERSE PROXY (ÚNICO EXPOSTO)
+  # =========================
+  traefik:
+    image: traefik:v3.1
+    restart: unless-stopped
+    command:
+      - --api.dashboard=true
+      - --providers.docker=true
+      - --providers.docker.exposedbydefault=false
+      - --entrypoints.web.address=:80
+      - --entrypoints.websecure.address=:443
+      # produção: ACME/Let's Encrypt (habilitar depois)
+      # - --certificatesresolvers.le.acme.email=${LE_EMAIL}
+      # - --certificatesresolvers.le.acme.storage=/letsencrypt/acme.json
+      # - --certificatesresolvers.le.acme.httpchallenge=true
+      # - --certificatesresolvers.le.acme.httpchallenge.entrypoint=web
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - traefik_letsencrypt:/letsencrypt
+    networks:
+      - public
+      - private
+   
+  # =========================
+  # DATABASES
+  # =========================
+  postgres:
+    image: postgres:15
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./infra/postgres/init:/docker-entrypoint-initdb.d:ro
+    networks:
+      - private
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  mariadb:
+    image: mariadb:10.6
+    restart: unless-stopped
+    environment:
+      MARIADB_ROOT_PASSWORD: ${MARIADB_ROOT_PASSWORD}
+      MARIADB_DATABASE: ${ERP_DB_NAME}
+      MARIADB_USER: ${ERP_DB_USER}
+      MARIADB_PASSWORD: ${ERP_DB_PASS}
+    volumes:
+      - mariadb_data:/var/lib/mysql
+    networks:
+      - private
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost"]
+      interval: 10s
+      timeout: 5s
+      retries: 15
+
+  # =========================
+  # DOCUMENTOS
+  # =========================
+  minio:
+    image: quay.io/minio/minio:latest
+    command: server /data --console-address ":9001"
+    restart: unless-stopped
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
+    volumes:
+      - minio_data:/data
+    networks:
+      - private
+    labels:
+      - traefik.enable=true
+      - traefik.docker.network=private
+
+      - traefik.http.routers.minio.rule=Host(`minio.localhost`)
+      - traefik.http.routers.minio.entrypoints=web
+      - traefik.http.routers.minio.service=minio-s3
+      - traefik.http.services.minio-s3.loadbalancer.server.port=9000
+
+      - traefik.http.routers.minio-console.rule=Host(`minio-console.localhost`)
+      - traefik.http.routers.minio-console.entrypoints=web
+      - traefik.http.routers.minio-console.service=minio-console
+      - traefik.http.services.minio-console.loadbalancer.server.port=9001
+
+  # =========================
+  # SSO / IAM
+  # =========================
+  keycloak:
+    image: quay.io/keycloak/keycloak:26.0
+    restart: unless-stopped
+    command: start-dev
+    environment:
+      KC_DB: postgres
+      KC_DB_URL: jdbc:postgresql://postgres:5432/${KC_DB_NAME}
+      KC_DB_USERNAME: ${KC_DB_USER}
+      KC_DB_PASSWORD: ${KC_DB_PASS}
+      KEYCLOAK_ADMIN: ${KC_ADMIN_USER}
+      KEYCLOAK_ADMIN_PASSWORD: ${KC_ADMIN_PASS}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - private
+    labels:
+      - traefik.enable=true
+      - traefik.http.routers.keycloak.rule=Host(`sso.localhost`)
+      - traefik.http.routers.keycloak.entrypoints=web
+      - traefik.http.services.keycloak.loadbalancer.server.port=8080
+
+  # =========================
+  # PROJETO / OBRA
+  # =========================
+  openproject:
+    image: openproject/community:13.0
+    restart: unless-stopped
+    environment:
+      DATABASE_URL: postgres://${OPENPROJECT_DB_USER}:${OPENPROJECT_DB_PASSWORD}@postgres:5432/${OPENPROJECT_DB_NAME}
+      OPENPROJECT_HOST__NAME: "openproject.localhost"
+      OPENPROJECT_HTTPS: "false"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    volumes:
+      - openproject_data:/var/openproject
+    networks:
+      - private
+    labels:
+      - traefik.enable=true
+      - traefik.http.routers.openproject.rule=Host(`openproject.localhost`)
+      - traefik.http.routers.openproject.entrypoints=web
+      - traefik.http.services.openproject.loadbalancer.server.port=80
+
+  # =========================
+  # ERP (exemplo de contêiner – ajuste conforme seu stack ERPNext real)
+  # =========================
+  erpnext:
+    image: frappe/erpnext:latest
+    restart: unless-stopped
+    depends_on:
+      mariadb:
+        condition: service_healthy
+    networks:
+      - private
+    labels:
+      - traefik.enable=true
+      - traefik.http.routers.erp.rule=Host(`erp.localhost`)
+      - traefik.http.routers.erp.entrypoints=web
+      - traefik.http.services.erp.loadbalancer.server.port=8000
+
+  # =========================
+  # AUTOMAÇÃO (N8N) + FILAS
+  # =========================
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    networks:
+      - private
+
+  n8n:
+    image: n8nio/n8n:latest
+    restart: unless-stopped
+    ports:
+      - "5678:5678"
+    environment:
+      N8N_HOST: n8n.localhost
+      N8N_PORT: "5678"
+      N8N_PROTOCOL: http
+      N8N_EDITOR_BASE_URL: http://n8n.localhost/
+      WEBHOOK_URL: http://n8n.localhost/
+      N8N_PROXY_HOPS: "1"
+      N8N_SECURE_COOKIE: "false"
+
+      DB_TYPE: postgresdb
+      DB_POSTGRESDB_HOST: postgres
+      DB_POSTGRESDB_DATABASE: ${N8N_DB_NAME}
+      DB_POSTGRESDB_USER: ${N8N_DB_USER}
+      DB_POSTGRESDB_PASSWORD: ${N8N_DB_PASS}
+
+      N8N_ENCRYPTION_KEY: ${N8N_ENCRYPTION_KEY}
+      N8N_BASIC_AUTH_ACTIVE: "true"
+      N8N_BASIC_AUTH_USER: ${N8N_BASIC_AUTH_USER}
+      N8N_BASIC_AUTH_PASSWORD: ${N8N_BASIC_AUTH_PASSWORD}
+      N8N_DIAGNOSTICS_ENABLED: "false"
+      N8N_DIAGNOSTICS_CONFIG_FRONTEND: "false"
+      N8N_DIAGNOSTICS_CONFIG_BACKEND: "false"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - private
+    labels:
+      - traefik.enable=true
+      - traefik.docker.network=projeto-garcia_private
+      - traefik.http.routers.n8n.rule=Host(`n8n.localhost`)
+      - traefik.http.routers.n8n.entrypoints=web
+      - traefik.http.services.n8n.loadbalancer.server.port=5678
+
+  # =========================
+  # API / WORKERS (FASTAPI)
+  # =========================
+  fire_api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: fire_api:latest
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - private
+    labels:
+      traefik.enable: "true"
+      traefik.http.routers.api.rule: "Host(`api.localhost`)"
+      traefik.http.routers.api.entrypoints: "web"
+      traefik.http.services.api.loadbalancer.server.port: "8000"
+    command: ["uvicorn", "fire_api.main:app", "--host", "0.0.0.0", "--port", "8000"]
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:8000/status/health || exit 1"]
+
+  # =========================
+  # OBSERVABILIDADE
+  # =========================
+  prometheus:
+    image: prom/prometheus
+    restart: unless-stopped
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus_data:/prometheus
+    networks:
+      - private
+    labels:
+      traefik.enable: "true"
+      traefik.http.routers.prometheus.rule: "Host(`prometheus.localhost`)"
+      traefik.http.routers.prometheus.entrypoints: "web"
+      traefik.http.services.prometheus.loadbalancer.server.port: "9090"
+
+  grafana:
+    image: grafana/grafana
+    restart: unless-stopped
+    environment:
+      - GF_SECURITY_ADMIN_USER=${GRAFANA_ADMIN_USER}
+      - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_ADMIN_PASS}
+    volumes:
+      - grafana_data:/var/lib/grafana
+    networks:
+      - private
+    labels:
+      - traefik.enable=true
+      - traefik.http.routers.grafana.rule=Host(`grafana.localhost`)
+      - traefik.http.routers.grafana.entrypoints=web
+      - traefik.http.services.grafana.loadbalancer.server.port=3000
+
+  loki:
+    image: grafana/loki:3.0.0
+    restart: unless-stopped
+    networks:
+      - private
+
+  promtail:
+    image: grafana/promtail:3.0.0
+    restart: unless-stopped
+    volumes:
+      - /var/lib/docker/containers:/var/lib/docker/containers:ro
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - ./promtail.yml:/etc/promtail/config.yml:ro
+    command: -config.file=/etc/promtail/config.yml
+    networks:
+      - private
+
+  # =========================
+  # BI (escolha 1 no MVP)
+  # =========================
+  superset:
+    build:
+      context: .
+      dockerfile: Dockerfile.superset
+    restart: unless-stopped
+    environment:
+      SUPERSET_DATABASE_URI: postgresql+psycopg2://${SUPERSET_DB_USER}:${SUPERSET_DB_PASS}@postgres:5432/${SUPERSET_DB_NAME}
+      SECRET_KEY: ${SUPERSET_SECRET_KEY}
+      SCARF_ANALYTICS: "false"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    volumes:
+      - superset_home:/app/superset_home
+      - ./superset_config.py:/app/pythonpath/superset_config.py
+    networks:
+      - private
+    labels:
+      - traefik.enable=true
+      - traefik.http.routers.superset.rule=Host(`superset.localhost`)
+      - traefik.http.routers.superset.entrypoints=web
+      - traefik.http.services.superset.loadbalancer.server.port=8088
+
+  # =========================
+  # ADMIN (APENAS DEV / PERFIL)
+  # =========================
+  pgadmin:
+    image: dpage/pgadmin4
+    profiles: ["dev"]
+    environment:
+      PGADMIN_DEFAULT_EMAIL: ${PGADMIN_DEFAULT_EMAIL}
+      PGADMIN_DEFAULT_PASSWORD: ${PGADMIN_DEFAULT_PASSWORD}
+    volumes:
+      - pgadmin_data:/var/lib/pgadmin
+    networks:
+      - private
+    labels:
+      - traefik.enable=true
+      - traefik.http.routers.pgadmin.rule=Host(`pgadmin.localhost`)
+      - traefik.http.routers.pgadmin.entrypoints=web
+      - traefik.http.services.pgadmin.loadbalancer.server.port=80
+
+volumes:
+  traefik_letsencrypt:
+  postgres_data:
+  postgres_init:
+  mariadb_data:
+  minio_data:
+  openproject_data:
+  prometheus_data:
+  grafana_data:
+  pgadmin_data:
+  superset_home:
+
+networks:
+  public:
+    driver: bridge
+  private:
+    driver: bridge
+    
