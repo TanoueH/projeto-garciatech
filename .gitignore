@@ -14,3 +14,6 @@ outputs/exports/*
 !data/processed/.gitkeep
 !outputs/reports/.gitkeep
 !outputs/exports/.gitkeep
+
+echo "*.swp" >> .gitignore
+echo "*.swo" >> .gitignore
