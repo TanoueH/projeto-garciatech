@@ -16,4 +16,4 @@ outputs/exports/*
 !outputs/exports/.gitkeep
 
 echo "*.swp" >> .gitignore
-echo "*.swo" >> .gitignore
+echo "*.swo" >> .gitignorenano.*.save
