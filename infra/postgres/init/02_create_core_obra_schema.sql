@@ -80,6 +80,18 @@ CREATE TABLE IF NOT EXISTS core.pendencias (
     data_fechamento TIMESTAMP
 );
 
+CREATE TABLE IF NOT EXISTS core.eventos_obra (
+    id SERIAL PRIMARY KEY,
+    obra_id INTEGER REFERENCES core.obras(id),
+    titulo TEXT NOT NULL,
+    descricao TEXT,
+    tipo_evento VARCHAR(100),
+    data_evento TIMESTAMP,
+    responsavel TEXT,
+    severidade VARCHAR(50),
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
 CREATE TABLE IF NOT EXISTS audit.processamento_arquivos (
     id SERIAL PRIMARY KEY,
     nome_arquivo TEXT NOT NULL,

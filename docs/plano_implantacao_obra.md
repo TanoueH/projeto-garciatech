@@ -8,12 +8,12 @@ Implantar uma estrutura inicial de gestão por dados para acompanhamento executi
 
 Fluxo inicial:
 
-E-mails / documentos / planilhas / relatórios / medições
-→ n8n
-→ MinIO
-→ Python ETL
-→ PostgreSQL
-→ Grafana
+E-mails / documentos / planilhas / relatórios / medições  
+→ n8n  
+→ MinIO  
+→ Python ETL  
+→ PostgreSQL  
+→ Grafana  
 
 ## 3. Escopo inicial
 
@@ -61,3 +61,7 @@ Fontes previstas:
 - Primeiro dashboard no Grafana;
 - Registro de documentos e metadados;
 - Cadastro inicial da obra.
+
+## 7. Observação estratégica
+
+Esta implantação será conduzida inicialmente como MVP operacional, priorizando rastreabilidade, centralização documental e indicadores executivos mínimos. A expansão para ERP, RPA, gestão avançada de contratos e integração com ferramentas externas será feita em fases posteriores.
