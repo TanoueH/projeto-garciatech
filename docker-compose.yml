@@ -75,13 +75,16 @@ services:
     environment:
       MINIO_ROOT_USER: ${MINIO_ROOT_USER}
       MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
+    ports:
+      - "9000:9000"
+      - "9001:9001"
     volumes:
       - minio_data:/data
     networks:
       - private
     labels:
       - traefik.enable=true
-      - traefik.docker.network=private
+      - traefik.docker.network=projeto-garcia_private
 
       - traefik.http.routers.minio.rule=Host(`minio.localhost`)
       - traefik.http.routers.minio.entrypoints=web
@@ -92,7 +95,6 @@ services:
       - traefik.http.routers.minio-console.entrypoints=web
       - traefik.http.routers.minio-console.service=minio-console
       - traefik.http.services.minio-console.loadbalancer.server.port=9001
-
   # =========================
   # SSO / IAM
   # =========================
@@ -124,9 +126,11 @@ services:
   openproject:
     image: openproject/community:13.0
     restart: unless-stopped
+    ports:
+      - "8081:80"
     environment:
       DATABASE_URL: postgres://${OPENPROJECT_DB_USER}:${OPENPROJECT_DB_PASSWORD}@postgres:5432/${OPENPROJECT_DB_NAME}
-      OPENPROJECT_HOST__NAME: "openproject.localhost"
+      OPENPROJECT_HOST__NAME: "localhost:8081"
       OPENPROJECT_HTTPS: "false"
     depends_on:
       postgres:
@@ -136,15 +140,13 @@ services:
     networks:
       - private
     labels:
-      - traefik.enable=true
-      - traefik.http.routers.openproject.rule=Host(`openproject.localhost`)
-      - traefik.http.routers.openproject.entrypoints=web
-      - traefik.http.services.openproject.loadbalancer.server.port=80
-
+      - traefik.enable=false
+      
   # =========================
   # ERP (exemplo de contêiner – ajuste conforme seu stack ERPNext real)
   # =========================
   erpnext:
+    profiles: ["erp"]
     image: frappe/erpnext:latest
     restart: unless-stopped
     depends_on:
@@ -283,6 +285,7 @@ services:
   # BI (escolha 1 no MVP)
   # =========================
   superset:
+    profiles: ["bi"]
     build:
       context: .
       dockerfile: Dockerfile.superset

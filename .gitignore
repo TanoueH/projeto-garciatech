@@ -17,3 +17,9 @@ outputs/exports/*
 
 echo "*.swp" >> .gitignore
 echo "*.swo" >> .gitignorenano.*.save
+docs/passwordn8n.txt
+data/import/*.xlsx
+data/import/*.csv
+*.swp
+*.swo
+nano.*.save
