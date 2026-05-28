@@ -175,14 +175,14 @@ services:
     ports:
       - "5678:5678"
     environment:
-      N8N_HOST: n8n.localhost
+      N8N_HOST: samsung.tailf17266.ts.net
       N8N_PORT: "5678"
       N8N_PROTOCOL: http
-      N8N_EDITOR_BASE_URL: http://n8n.localhost/
-      WEBHOOK_URL: http://n8n.localhost/
+      N8N_EDITOR_BASE_URL: http://samsung.tailf17266.ts.net:5678/
+      WEBHOOK_URL: http://samsung.tailf17266.ts.net:5678/
       N8N_PROXY_HOPS: "1"
       N8N_SECURE_COOKIE: "false"
-
+      
       DB_TYPE: postgresdb
       DB_POSTGRESDB_HOST: postgres
       DB_POSTGRESDB_DATABASE: ${N8N_DB_NAME}
@@ -196,18 +196,28 @@ services:
       N8N_DIAGNOSTICS_ENABLED: "false"
       N8N_DIAGNOSTICS_CONFIG_FRONTEND: "false"
       N8N_DIAGNOSTICS_CONFIG_BACKEND: "false"
+
+      NODE_FUNCTION_ALLOW_BUILTIN: crypto
+      NODES_EXCLUDE: "[]"
+      N8N_RESTRICT_FILE_ACCESS_TO: "/data;/outputs"
+
+    volumes:
+      - ./data:/data
+      - ./outputs:/outputs
+
     depends_on:
       postgres:
         condition: service_healthy
+
     networks:
       - private
+
     labels:
       - traefik.enable=true
       - traefik.docker.network=projeto-garcia_private
       - traefik.http.routers.n8n.rule=Host(`n8n.localhost`)
       - traefik.http.routers.n8n.entrypoints=web
       - traefik.http.services.n8n.loadbalancer.server.port=5678
-
   # =========================
   # API / WORKERS (FASTAPI)
   # =========================
@@ -338,6 +348,7 @@ volumes:
   grafana_data:
   pgadmin_data:
   superset_home:
+  
 
 networks:
   public:
