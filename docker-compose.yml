@@ -349,28 +349,27 @@ services:
     ports:
       - "8080:8080"
     environment:
-      - TZ=America/Sao_Paulo 
-      - SERVER_URL=http://192.168.15.100:8080
+      - TZ=America/Sao_Paulo
+      - SERVER_URL=${EVOLUTION_SERVER_URL}
       - ENV=PROD
       - API_VERSION=v2
+
       - CORS_ORIGIN=*
       - CORS_METHODS=GET,POST,PUT,DELETE
       - CORS_CREDENTIALS=true
-      - AUTHENTICATION_TYPE= ${EVOLUTION_ADMIN_USAR}
-      - AUTHENTICATION_API_KEY= ${EVOLUTION_API_kEY}
-     
+
+      - AUTHENTICATION_TYPE=${EVOLUTION_AUTHENTICATION_TYPE}
+      - AUTHENTICATION_API_KEY=${EVOLUTION_API_KEY}
+
       - DATABASE_ENABLED=true
       - DATABASE_PROVIDER=postgresql
-      
       - DATABASE_CONNECTION_URI=postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}?schema=evolution
-      - REDIS_PASSWORD=
-      
-      - CACHE_REDIS_SAVE_INSTANCES=true
-      - CACHE_REDIS_PREFIX_KEY=evolution
+
       - CACHE_REDIS_ENABLED=true
       - CACHE_REDIS_URI=redis://redis:6379/6
+      - CACHE_REDIS_PREFIX_KEY=evolution
+      - CACHE_REDIS_SAVE_INSTANCES=true
       - CACHE_LOCAL_ENABLED=false
-      - CACHE_REDIS_PASSWORD=
     volumes:
       - evolution_data:/evolution/instances
     networks:
