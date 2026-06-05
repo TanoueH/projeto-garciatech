@@ -356,8 +356,8 @@ services:
       - CORS_ORIGIN=*
       - CORS_METHODS=GET,POST,PUT,DELETE
       - CORS_CREDENTIALS=true
-      - AUTHENTICATION_TYPE=apikey
-      - AUTHENTICATION_API_KEY=apikey1234 # Insira uma chave para proteger sua API
+      - AUTHENTICATION_TYPE= ${EVOLUTION_ADMIN_USAR}
+      - AUTHENTICATION_API_KEY= ${EVOLUTION_API_kEY}
      
       - DATABASE_ENABLED=true
       - DATABASE_PROVIDER=postgresql
