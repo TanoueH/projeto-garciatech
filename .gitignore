@@ -23,3 +23,35 @@ data/import/*.csv
 *.swp
 *.swo
 nano.*.save
+
+# Ambiente local
+.env.*
+docker-compose.override.yml
+
+# Backups
+*.bak
+*.tmp
+
+# Dados brutos/importados
+data/import/*
+data/raw/*
+data/staging/*
+data/processed/*
+
+# Mantém estrutura de pastas
+!data/import/.gitkeep
+!data/raw/.gitkeep
+!data/staging/.gitkeep
+!data/processed/.gitkeep
+
+# Outputs gerados
+outputs/exports/*
+outputs/reports/*
+
+!outputs/exports/.gitkeep
+!outputs/reports/.gitkeep
+
+# Credenciais e segredos
+docs/password*.txt
+docs/*senha*.txt
+docs/comandos.txt

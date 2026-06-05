@@ -1,0 +1,179 @@
+<!doctype html>
+<html lang="pt-br">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Garcia Tech — Painel do Eng. Renato</title>
+
+  <style>
+    :root {
+      color-scheme: dark;
+      --bg: #0b0f14;
+      --card: #121923;
+      --card-hover: #182230;
+      --text: #e7eef7;
+      --muted: #9aa7b8;
+      --accent: #38bdf8;
+      --border: #233044;
+      --green: #86efac;
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    body {
+      margin: 0;
+      padding: 28px;
+      font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      background:
+        radial-gradient(circle at top left, rgba(56, 189, 248, 0.12), transparent 32%),
+        var(--bg);
+      color: var(--text);
+    }
+
+    header {
+      max-width: 960px;
+      margin-bottom: 28px;
+    }
+
+    .tag {
+      display: inline-block;
+      margin-bottom: 12px;
+      padding: 6px 10px;
+      border: 1px solid var(--border);
+      border-radius: 999px;
+      color: var(--muted);
+      font-size: 13px;
+      background: rgba(18, 25, 35, 0.8);
+    }
+
+    h1 {
+      margin: 0 0 8px;
+      font-size: 28px;
+      font-weight: 750;
+      letter-spacing: -0.02em;
+    }
+
+    p {
+      margin: 0;
+      color: var(--muted);
+      line-height: 1.5;
+    }
+
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+      gap: 18px;
+      max-width: 960px;
+    }
+
+    .card {
+      display: block;
+      min-height: 150px;
+      padding: 22px;
+      border: 1px solid var(--border);
+      border-radius: 18px;
+      background: rgba(18, 25, 35, 0.94);
+      color: var(--text);
+      text-decoration: none;
+      transition: 0.18s ease;
+    }
+
+    .card:hover {
+      background: var(--card-hover);
+      transform: translateY(-2px);
+      border-color: var(--accent);
+    }
+
+    .card .icon {
+      width: 42px;
+      height: 42px;
+      display: grid;
+      place-items: center;
+      margin-bottom: 16px;
+      border-radius: 12px;
+      background: rgba(56, 189, 248, 0.12);
+      color: var(--accent);
+      font-size: 22px;
+    }
+
+    .card h2 {
+      margin: 0 0 8px;
+      font-size: 20px;
+    }
+
+    .card span {
+      display: block;
+      color: var(--muted);
+      font-size: 14px;
+      line-height: 1.45;
+    }
+
+    .notice {
+      margin-top: 30px;
+      padding: 18px;
+      max-width: 960px;
+      border: 1px solid var(--border);
+      border-radius: 16px;
+      background: rgba(16, 23, 34, 0.95);
+      color: var(--muted);
+      font-size: 14px;
+      line-height: 1.6;
+    }
+
+    .status {
+      color: var(--green);
+      font-weight: 700;
+    }
+
+    footer {
+      margin-top: 24px;
+      color: var(--muted);
+      font-size: 12px;
+    }
+  </style>
+</head>
+
+<body>
+  <header>
+    <div class="tag">Garcia Tech · Acesso de obra</div>
+    <h1>Painel do Eng. Renato</h1>
+    <p>
+      Acesso operacional aos sistemas liberados para acompanhamento da obra.
+      Para funcionar, o Tailscale precisa estar conectado no PC do Renato e no PC do Heloi.
+    </p>
+  </header>
+
+  <main class="grid">
+    <a class="card" href="http://samsung.tailf17266.ts.net:8081/" target="_blank">
+      <div class="icon">📋</div>
+      <h2>OpenProject</h2>
+      <span>Gestão da obra, cronograma, tarefas, pendências, responsáveis e anexos.</span>
+    </a>
+
+    <a class="card" href="http://samsung.tailf17266.ts.net:13001/" target="_blank">
+      <div class="icon">📊</div>
+      <h2>Grafana</h2>
+      <span>Painéis de acompanhamento, indicadores e visualização gerencial da obra.</span>
+    </a>
+  
+    <a class="card" href="http://samsung.tailf17266.ts.net:5678/" target="_blank">
+      <div class="icon">⚙️</div>
+      <h2>n8n</h2>
+      <span>Ambiente de aprendizado e automações da Garcia Tech.</span>
+    </a>
+  </main>
+
+  <section class="notice">
+    <strong>Status esperado:</strong>
+    <span class="status">Tailscale conectado</span><br>
+    Este painel não armazena senhas. O acesso aos sistemas continua dependendo do login individual no OpenProject e no Grafana.
+    Caso algum botão não abra, verificar primeiro se o Tailscale está ativo nos dois computadores.
+  </section>
+
+  <footer>
+    Garcia Tech · Painel operacional restrito · Piloto de implantação
+  </footer>
+</body>
+</html>

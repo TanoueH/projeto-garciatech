@@ -1,0 +1,322 @@
+<!doctype html>
+<html lang="pt-br">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Garcia Tech Dev Dashboard</title>
+
+  <style>
+    :root {
+      color-scheme: dark;
+      --bg: #0b0f14;
+      --panel: #101820;
+      --panel-hover: #0e1a25;
+      --border: #1d2733;
+      --accent: #2d8cff;
+      --text: #e7eef7;
+      --muted: #8fa3b8;
+      --ok: #33d17a;
+      --warn: #f6c177;
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    body {
+      margin: 0;
+      padding: 28px;
+      font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      background:
+        radial-gradient(circle at top left, rgba(45, 140, 255, 0.12), transparent 32rem),
+        var(--bg);
+      color: var(--text);
+    }
+
+    header {
+      margin-bottom: 26px;
+    }
+
+    h1 {
+      font-size: 26px;
+      font-weight: 800;
+      margin: 0 0 6px;
+      letter-spacing: -0.03em;
+    }
+
+    .subtitle {
+      color: var(--muted);
+      font-size: 14px;
+      margin: 0;
+    }
+
+    .section-title {
+      margin: 28px 0 12px;
+      font-size: 13px;
+      text-transform: uppercase;
+      letter-spacing: .12em;
+      color: var(--muted);
+      font-weight: 700;
+    }
+
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(250px, 1fr));
+      gap: 16px;
+    }
+
+    .card {
+      display: flex;
+      align-items: center;
+      gap: 14px;
+      min-height: 96px;
+      padding: 16px;
+      border-radius: 16px;
+      background: rgba(16, 24, 32, 0.92);
+      border: 1px solid var(--border);
+      text-decoration: none;
+      color: inherit;
+      transition: transform .15s ease, border-color .15s ease, background .15s ease;
+    }
+
+    .card:hover {
+      transform: translateY(-3px);
+      border-color: var(--accent);
+      background: var(--panel-hover);
+    }
+
+    .card.disabled {
+      opacity: .45;
+     cursor: not-allowed;
+    }
+
+    .card.disabled:hover {
+      transform: none;
+      border-color: var(--border);
+      background: rgba(16, 24, 32, 0.92);
+    }
+
+    .icon {
+      flex: 0 0 auto;
+      width: 44px;
+      height: 44px;
+      border-radius: 12px;
+      background-color: #172230;
+      background-size: 70%;
+      background-position: center;
+      background-repeat: no-repeat;
+      border: 1px solid #243244;
+    }
+
+    .content h3 {
+      margin: 0 0 6px;
+      font-size: 16px;
+      font-weight: 750;
+    }
+
+    .content p {
+      margin: 0;
+      font-size: 12px;
+      color: var(--muted);
+      word-break: break-all;
+    }
+
+    .badge {
+      display: inline-block;
+      margin-top: 8px;
+      padding: 3px 7px;
+      border-radius: 999px;
+      font-size: 11px;
+      font-weight: 700;
+      background: rgba(45, 140, 255, .12);
+      color: #9fcaff;
+      border: 1px solid rgba(45, 140, 255, .28);
+    }
+
+    .badge-dev {
+      background: rgba(246, 193, 119, .12);
+      color: var(--warn);
+      border-color: rgba(246, 193, 119, .28);
+    }
+
+    .muted {
+      opacity: .68;
+      margin-top: 28px;
+      font-size: 12px;
+      line-height: 1.5;
+    }
+  </style>
+</head>
+
+<body>
+
+<header>
+  <h1>Garcia Tech Dev Dashboard</h1>
+  <p class="subtitle">Painel local da stack Garcia Tech / Projeto Garcia</p>
+</header>
+
+<section>
+  <div class="section-title">Projeto e automação</div>
+
+  <div class="grid">
+
+    <a class="card" href="http://samsung.tailf17266.ts.net:8081/" target="_blank">
+      <div class="icon" style="background-image:url('./icons/openproject.png');"></div>
+      <div class="content">
+        <h3>OpenProject</h3>
+        <p>http://samsung.tailf17266.ts.net:8081/</p>
+        <span class="badge">Gestão da obra</span>
+      </div>
+    </a>
+
+    <a class="card" href="http://samsung.tailf17266.ts.net:5678/" target="_blank">
+      <div class="icon" style="background-image:url('./icons/n8n.png');"></div>
+      <div class="content">
+        <h3>n8n</h3>
+        <p>http://samsung.tailf17266.ts.net:5678/</p>
+        <span class="badge">Automação</span>
+      </div>
+    </a>
+
+    <a class="card disable" href="#" onclick="return false;">
+      <div class="icon" style="background-image:url('./icons/erpnext.png');"></div>
+      <div class="content">
+        <h3>ERPNext</h3>
+        <p>Serviço planejado para fase posterior do MVP</p>
+        <span class="badge badge-dev">Não ativo</span>
+      </div>
+    </a>
+
+  </div>
+</section>
+
+<section>
+  <div class="section-title">Dados, arquivos e identidade</div>
+
+  <div class="grid">
+
+    <a class="card" href="http://minio-console.localhost" target="_blank">
+      <div class="icon" style="background-image:url('./icons/minio.png');"></div>
+      <div class="content">
+        <h3>MinIO Console</h3>
+        <p>http://minio-console.localhost</p>
+        <span class="badge">Documentos</span>
+      </div>
+    </a>
+
+    <a class="card" href="http://sso.localhost" target="_blank">
+      <div class="icon" style="background-image:url('./icons/keycloak.png');"></div>
+      <div class="content">
+        <h3>Keycloak</h3>
+        <p>http://sso.localhost</p>
+        <span class="badge">SSO / IAM</span>
+      </div>
+    </a>
+
+    <a class="card" href="http://pgadmin.localhost" target="_blank">
+      <div class="icon" style="background-image:url('./icons/pgadmin.png');"></div>
+      <div class="content">
+        <h3>pgAdmin</h3>
+        <p>http://pgadmin.localhost</p>
+        <span class="badge badge-dev">Perfil dev</span>
+      </div>
+    </a>
+
+  </div>
+</section>
+
+<section>
+  <div class="section-title">API, BI e observabilidade</div>
+
+  <div class="grid">
+
+    <a class="card" href="http://localhost:8080/manager/" target="_blank">
+      <div class="icon" style="background-image:url('./icons/evolution-api.png');"></div>
+      <div class="content">
+        <h3>Evolution-Api</h3>
+        <p>http://localhost:8080/manager/</p>
+        <span class="badge">Whatsap-api</span>
+      </div>
+    </a>
+
+    <a class="card" href="http://api.localhost/docs" target="_blank">
+      <div class="icon" style="background-image:url('./icons/api_docs.png');"></div>
+      <div class="content">
+        <h3>API Docs</h3>
+        <p>http://api.localhost/docs</p>
+        <span class="badge">FastAPI</span>
+      </div>
+    </a>
+
+    <a class="card" href="http://api.localhost/status/health" target="_blank">
+      <div class="icon" style="background-image:url('./icons/api_health.png');"></div>
+      <div class="content">
+        <h3>API Health</h3>
+        <p>http://api.localhost/status/health</p>
+        <span class="badge">Status</span>
+      </div>
+    </a>
+
+    <a class="card" href="http://grafana.localhost" target="_blank">
+      <div class="icon" style="background-image:url('./icons/grafana.png');"></div>
+      <div class="content">
+        <h3>Grafana</h3>
+        <p>http://grafana.localhost</p>
+        <span class="badge">Dashboards</span>
+      </div>
+    </a>
+
+    <a class="card" href="http://prometheus.localhost" target="_blank">
+      <div class="icon" style="background-image:url('./icons/prometheus.png');"></div>
+      <div class="content">
+        <h3>Prometheus</h3>
+        <p>http://prometheus.localhost</p>
+        <span class="badge">Métricas</span>
+      </div>
+    </a>
+
+    <a class="card" href="http://superset.localhost" target="_blank">
+      <div class="icon" style="background-image:url('./icons/superset.png');"></div>
+      <div class="content">
+        <h3>Superset</h3>
+        <p>http://superset.localhost</p>
+        <span class="badge">BI</span>
+      </div>
+    </a>
+
+  </div>
+</section>
+
+<section>
+  <div class="section-title">Infraestrutura e repositórios</div>
+
+  <div class="grid">
+
+    <a class="card disabled" href="#" onclick="return false;">
+  <div class="icon" style="background-image:url('./icons/traefik.jpg');"></div>
+  <div class="content">
+    <h3>Traefik Dashboard</h3>
+    <p>Dashboard ainda não exposto diretamente</p>
+    <span class="badge badge-dev">Verificar rota</span>
+  </div>
+</a>
+
+    <a class="card" href="https://github.com/TanoueH" target="_blank">
+      <div class="icon" style="background-image:url('./icons/github.png');"></div>
+      <div class="content">
+        <h3>GitHub</h3>
+        <p>github.com/TanoueH</p>
+        <span class="badge">Repositórios</span>
+      </div>
+    </a>
+
+  </div>
+</section>
+
+<p class="muted">
+  Painel local do Garcia Tech. Os links usam as rotas Traefik definidas no docker-compose.yml.
+  Se algum serviço mudar de domínio, porta ou perfil, edite este arquivo manualmente.
+</p>
+
+</body>
+</html>
