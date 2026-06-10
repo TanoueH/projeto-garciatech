@@ -1,0 +1,596 @@
+{
+  "name": "Agente 00 — Entrada WhatsApp",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "whatsapp-entrada",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2.1,
+      "position": [
+        0,
+        0
+      ],
+      "id": "35eee431-1c01-4fb0-be29-44eb61923c3e",
+      "name": "Webhook",
+      "webhookId": "762ef764-c21b-4e09-b0d8-92b902af33ac"
+    },
+    {
+      "parameters": {
+        "jsCode": "const inputOriginal = $input.first().json;\nconst body = inputOriginal.body ?? inputOriginal;\n\nfunction pick(...values) {\n  for (const value of values) {\n    if (value !== undefined && value !== null && value !== '') return value;\n  }\n  return null;\n}\n\nfunction cleanText(value) {\n  if (value === undefined || value === null) return '';\n  return String(value).replace(/^=/, '').trim();\n}\n\n// Estrutura variável conforme evento/versão da Evolution.\n// Mantemos extração tolerante.\nconst data = body.data ?? body;\n\nconst mensagem =\n  pick(\n    data?.message?.conversation,\n    data?.message?.extendedTextMessage?.text,\n    data?.text,\n    body?.message,\n    body?.mensagem\n  ) || '';\n\nconst telefone =\n  pick(\n    data?.key?.remoteJid,\n    data?.remoteJid,\n    data?.from,\n    body?.from,\n    body?.telefone\n  ) || '';\n\nconst nomeContato =\n  pick(\n    data?.pushName,\n    data?.senderName,\n    body?.pushName,\n    body?.nome_contato\n  ) || null;\n\nconst instance =\n  pick(\n    body?.instance,\n    body?.instanceName,\n    data?.instance,\n    data?.instanceName\n  ) || null;\n\nconst mensagemLower = cleanText(mensagem).toLowerCase();\n\n// Regra simples de obra: se não vier no texto, usa padrão MVP\nlet obraCodigo = 'OBRA-001';\nconst obraMatch = mensagem.match(/OBRA[-_\\s]?\\d+/i);\nif (obraMatch) {\n  obraCodigo = obraMatch[0].replace(/\\s+/g, '-').toUpperCase();\n}\n\n// Classificação simples de rota\nlet tipo_entrada = 'MENSAGEM_GERAL';\n\nif (\n  mensagemLower.includes('relatório diário') ||\n  mensagemLower.includes('relatorio diario') ||\n  mensagemLower.includes('rdo') ||\n  mensagemLower.includes('hoje executamos') ||\n  mensagemLower.includes('foram executados')\n) {\n  tipo_entrada = 'RELATO_RDO';\n}\n\nif (\n  mensagemLower.includes('pendência') ||\n  mensagemLower.includes('pendencia') ||\n  mensagemLower.includes('não foram enviadas fotos') ||\n  mensagemLower.includes('nao foram enviadas fotos') ||\n  mensagemLower.includes('necessário confirmar') ||\n  mensagemLower.includes('necessario confirmar')\n) {\n  // Se for relato de RDO com pendência, deixamos como RELATO_RDO,\n  // porque o Agente 02 já aciona o Agente 03.\n  if (tipo_entrada !== 'RELATO_RDO') {\n    tipo_entrada = 'PENDENCIA';\n  }\n}\n\nreturn [\n  {\n    json: {\n      canal: 'WHATSAPP',\n      instance,\n      telefone_origem: telefone,\n      nome_contato: nomeContato,\n      obra_codigo: obraCodigo,\n      mensagem: cleanText(mensagem),\n      tipo_entrada,\n      possui_anexo: Boolean(data?.message?.imageMessage || data?.message?.documentMessage || data?.message?.audioMessage),\n      payload_original: inputOriginal,\n      data_recebimento: new Date().toISOString()\n    }\n  }\n];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        208,
+        0
+      ],
+      "id": "fea87324-d3b1-4512-801d-8b0ee1834bcc",
+      "name": "Normalizar WhatsApp"
+    },
+    {
+      "parameters": {
+        "rules": {
+          "values": [
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 3
+                },
+                "conditions": [
+                  {
+                    "leftValue": "={{ $json.tipo_entrada }}",
+                    "rightValue": "RELATO_RDO",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    },
+                    "id": "fc0b847a-1a9f-4a07-927c-ba33028d3175"
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "RELATO_RDO"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 3
+                },
+                "conditions": [
+                  {
+                    "id": "975118bd-efbe-4885-8bed-ebed67fd988d",
+                    "leftValue": "={{ $json.tipo_entrada }}",
+                    "rightValue": "PENDENCIA",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals",
+                      "name": "filter.operator.equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "PENDENCIA"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 3
+                },
+                "conditions": [
+                  {
+                    "id": "4f2232af-c32b-45f9-a9f3-1f4d2a153f81",
+                    "leftValue": "= {{ $json.tipo_entrada }}",
+                    "rightValue": "MENSAGEM_GERAL",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals",
+                      "name": "filter.operator.equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "MENSAGEM_GERAL"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 3.4,
+      "position": [
+        1440,
+        -16
+      ],
+      "id": "938ccb63-f344-4ac6-a636-9de4c1fdf3de",
+      "name": "Switch"
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ $json.resposta_final }}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.5,
+      "position": [
+        2848,
+        144
+      ],
+      "id": "c90bdea4-31f0-47fc-9d31-2e56c8765300",
+      "name": "Respond to Webhook"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://127.0.0.1:5678/webhook/gerar-rdo",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{\n  {\n    obra_codigo: $json.obra_codigo ?? null,\n    data_rdo: $now.toISODate(),\n    responsavel: $json.nome_contato ?? 'WhatsApp',\n\n    clima: null,\n    condicoes_canteiro: 'Não informado.',\n\n    atividades: $json.mensagem ?? null,\n    mao_de_obra: null,\n    equipamentos: null,\n    materiais: null,\n\n    ocorrencias: $json.mensagem ?? null,\n\n    pendencias: (\n      String($json.mensagem ?? '').toLowerCase().includes('foto') ||\n      String($json.mensagem ?? '').toLowerCase().includes('pendência') ||\n      String($json.mensagem ?? '').toLowerCase().includes('pendencia') ||\n      String($json.mensagem ?? '').toLowerCase().includes('confirmar') ||\n      String($json.mensagem ?? '').toLowerCase().includes('conferir')\n    )\n      ? ($json.mensagem ?? null)\n      : null,\n\n    origem: 'WHATSAPP',\n    telefone_origem: $json.telefone_origem ?? null,\n\n    idempotency_key: $json.idempotency_key ?? null,\n    correlation_id: $json.correlation_id ?? null,\n    evento_origem_id: $json.evento_id ?? null\n  }\n}}",
+        "options": {
+          "response": {
+            "response": {
+              "responseFormat": "text",
+              "outputPropertyName": "resposta_bruta"
+            }
+          }
+        }
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.3,
+      "position": [
+        1760,
+        -304
+      ],
+      "id": "773b130f-b1ad-4cef-8015-f8a2b6f9632b",
+      "name": "Acionar agente 02"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": " http://127.0.0.1:5678/webhook/registrar-pendencia",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"obra_codigo\": \"{{ $json.obra_codigo }}\",\n  \"origem\": \"WHATSAPP\",\n  \"origem_tipo\": \"MENSAGEM_CAMPO\",\n  \"origem_id\": \"{{ $json.telefone_origem }}_{{ $json.data_recebimento }}\",\n  \"data_identificacao\": \"{{ new Date().toISOString().slice(0, 10) }}\",\n  \"responsavel_identificacao\": \"{{ $json.nome_contato || $json.telefone_origem || 'WhatsApp' }}\",\n  \"descricao\": \"{{ $json.mensagem }}\",\n  \"responsavel_acao\": \"{{ $json.nome_contato || 'A definir' }}\",\n  \"prazo_limite\": null,\n  \"evidencias\": {\n    \"canal\": \"WHATSAPP\",\n    \"telefone_origem\": \"{{ $json.telefone_origem }}\",\n    \"origem_agente\": \"Agente 00 — Entrada WhatsApp\"\n  }\n}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.3,
+      "position": [
+        1776,
+        -64
+      ],
+      "id": "bee02eaa-19df-4719-97ae-f3591d0efb4b",
+      "name": "Acionar agente 03"
+    },
+    {
+      "parameters": {
+        "jsCode": "const crypto = require('crypto');\n\nconst item = $input.first().json;\n\n/**\n * Retorna texto normalizado.\n */\nfunction cleanText(value) {\n  if (value === undefined || value === null) return '';\n\n  return String(value)\n    .replace(/^=/, '')\n    .trim();\n}\n\n/**\n * Normaliza texto para geração de hash.\n */\nfunction normalizeForHash(value) {\n  return cleanText(value)\n    .normalize('NFD')\n    .replace(/[\\u0300-\\u036f]/g, '')\n    .replace(/\\s+/g, ' ')\n    .toLowerCase();\n}\n\n/**\n * Gera SHA-256 hexadecimal.\n */\nfunction sha256(value) {\n  return crypto\n    .createHash('sha256')\n    .update(String(value), 'utf8')\n    .digest('hex');\n}\n\n// Preserva compatibilidade com payload bruto ou já normalizado.\nconst payloadOriginal =\n  item.payload_original ||\n  item.entrada_original ||\n  item;\n\nconst body = payloadOriginal.body || payloadOriginal;\nconst data = body.data || body;\nconst key = data.key || {};\n\nconst instance = cleanText(\n  body.instance ||\n  item.instance ||\n  'obra-caio'\n);\n\nconst messageId = cleanText(\n  key.id ||\n  data.messageId ||\n  body.messageId ||\n  item.message_id\n);\n\nconst remoteJid = cleanText(\n  key.remoteJid ||\n  item.telefone_origem ||\n  item.remote_jid\n);\n\nconst obraCodigo = cleanText(\n  item.obra_codigo ||\n  body.obra_codigo\n);\n\nconst tipoEntrada = cleanText(\n  item.tipo_entrada\n);\n\nconst mensagem = cleanText(\n  item.mensagem ||\n  data.message?.conversation ||\n  data.message?.extendedTextMessage?.text ||\n  data.message?.imageMessage?.caption ||\n  data.message?.documentMessage?.caption\n);\n\n// O hash ignora timestamp de recebimento para que a mesma mensagem\n// produza sempre a mesma identificação.\nconst payloadCanonico = JSON.stringify({\n  instance,\n  message_id: messageId || null,\n  remote_jid: remoteJid || null,\n  obra_codigo: obraCodigo || null,\n  tipo_entrada: tipoEntrada || null,\n  mensagem: normalizeForHash(mensagem)\n});\n\nconst payloadHash = sha256(payloadCanonico);\n\n// Prioridade: ID real da Evolution.\n// Fallback: hash do conteúdo normalizado.\nconst baseIdempotencia = messageId\n  ? `WHATSAPP|${instance}|${messageId}`\n  : `WHATSAPP|${instance}|${remoteJid}|${payloadHash}`;\n\nconst idempotencyKey =\n  `WA_${sha256(baseIdempotencia)}`.slice(0, 128);\n\nreturn [\n  {\n    json: {\n      ...item,\n\n      evolution_instance: instance,\n      evolution_message_id: messageId || null,\n\n      idempotency_key: idempotencyKey,\n      correlation_id: crypto.randomUUID(),\n      payload_hash: payloadHash,\n\n      idempotency_source: messageId\n        ? 'EVOLUTION_MESSAGE_ID'\n        : 'PAYLOAD_HASH'\n    }\n  }\n];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        416,
+        0
+      ],
+      "id": "452be183-b81b-4f11-b2a9-d12d81c0bf0b",
+      "name": "Gerar Identificadores"
+    },
+    {
+      "parameters": {
+        "mode": "combine",
+        "combineBy": "combineByPosition",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.merge",
+      "typeVersion": 3.2,
+      "position": [
+        608,
+        576
+      ],
+      "id": "43de8333-4c50-4621-92e3-df06192064ca",
+      "name": "Merge Idempotência"
+    },
+    {
+      "parameters": {
+        "jsCode": "const item = $input.first().json;\n\nfunction parseBoolean(value) {\n  if (value === true) return true;\n  if (value === false) return false;\n\n  return ['true', 't', '1', 'sim', 'yes'].includes(\n    String(value ?? '').trim().toLowerCase()\n  );\n}\n\nreturn [\n  {\n    json: {\n      evento_id: item.evento_id || null,\n      idempotency_key: item.idempotency_key || null,\n\n      correlation_id:\n        item.correlation_id_evento || null,\n\n      obra_codigo: item.obra_codigo || null,\n      tipo_entrada: item.tipo_entrada || null,\n      mensagem: item.mensagem || null,\n      payload_hash: item.payload_hash || null,\n\n      evento_status: item.evento_status || null,\n      evento_criado_em: item.evento_criado_em || null,\n      evento_novo: parseBoolean(item.evento_novo)\n    }\n  }\n];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        896,
+        0
+      ],
+      "id": "404a1648-6080-40f7-b6ca-846b1aac8567",
+      "name": "Consolidar Idempotência"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 3
+          },
+          "conditions": [
+            {
+              "id": "f34d93b6-6872-4cb0-b29c-1ed29eaaa88c",
+              "leftValue": "={{ $json.evento_novo }}",
+              "rightValue": "true",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        1136,
+        0
+      ],
+      "id": "a2c9acf0-d47f-4b35-8ca5-7430cd5fc67e",
+      "name": "If"
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ $json }}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.5,
+      "position": [
+        1840,
+        400
+      ],
+      "id": "a2bbe83a-da2a-4fe2-aeb7-82bfb9ef3db4",
+      "name": "Respond to Webhook1"
+    },
+    {
+      "parameters": {
+        "jsCode": "const item = $input.first().json;\n\nreturn [\n  {\n    json: {\n      status: 'ja_processado',\n      duplicado: true,\n      obra_codigo: item.obra_codigo || null,\n      tipo_entrada: item.tipo_entrada || null,\n      evento_id: item.evento_id || null,\n      idempotency_key: item.idempotency_key || null,\n      correlation_id: item.correlation_id || null,\n      mensagem: 'Este evento já havia sido processado anteriormente.'\n    }\n  }\n];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1616,
+        368
+      ],
+      "id": "d35618ba-d8bf-47b7-8bc1-e480baa27d81",
+      "name": "Montar Resposta Duplicado"
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "WITH inserido AS (\n    INSERT INTO public.eventos_processados (\n        idempotency_key,\n        correlation_id,\n        agente,\n        origem,\n        obra_codigo,\n        status,\n        payload_hash\n    )\n    VALUES (\n        $1,\n        $2::uuid,\n        'AGENTE_00',\n        'WHATSAPP',\n        $3,\n        'PROCESSANDO',\n        $4\n    )\n    ON CONFLICT (idempotency_key) DO NOTHING\n    RETURNING\n        id,\n        idempotency_key,\n        correlation_id,\n        obra_codigo,\n        status,\n        payload_hash,\n        criado_em\n),\n\nexistente_atualizado AS (\n    UPDATE public.eventos_processados AS e\n    SET\n        obra_codigo = COALESCE(e.obra_codigo, $3),\n        payload_hash = COALESCE(e.payload_hash, $4),\n        atualizado_em = CURRENT_TIMESTAMP\n    WHERE e.idempotency_key = $1\n      AND NOT EXISTS (\n          SELECT 1\n          FROM inserido\n      )\n    RETURNING\n        e.id,\n        e.idempotency_key,\n        e.correlation_id,\n        e.obra_codigo,\n        e.status,\n        e.payload_hash,\n        e.criado_em\n)\n\nSELECT *\nFROM (\n    SELECT\n        i.id AS evento_id,\n        i.idempotency_key,\n        i.correlation_id::text AS correlation_id_evento,\n        i.obra_codigo,\n        i.payload_hash,\n        $5::text AS tipo_entrada,\n        $6::text AS mensagem,\n        i.status AS evento_status,\n        i.criado_em AS evento_criado_em,\n        TRUE AS evento_novo\n    FROM inserido AS i\n\n    UNION ALL\n\n    SELECT\n        e.id AS evento_id,\n        e.idempotency_key,\n        e.correlation_id::text AS correlation_id_evento,\n        e.obra_codigo,\n        e.payload_hash,\n        $5::text AS tipo_entrada,\n        $6::text AS mensagem,\n        e.status AS evento_status,\n        e.criado_em AS evento_criado_em,\n        FALSE AS evento_novo\n    FROM existente_atualizado AS e\n) AS resultado\nLIMIT 1;",
+        "options": {
+          "queryReplacement": "={{ [\n  $json.idempotency_key,\n  $json.correlation_id,\n  $json.obra_codigo,\n  $json.payload_hash,\n  $json.tipo_entrada,\n  $json.mensagem\n] }}"
+        }
+      },
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        656,
+        0
+      ],
+      "id": "8f8e4f7d-44ff-47ea-9c75-61f8d59003c1",
+      "name": "Execute a SQL query",
+      "credentials": {
+        "postgres": {
+          "id": "N4gqDQWfI7uqxr5f",
+          "name": "Postgres Docker - garcia_db"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "UPDATE public.eventos_processados\nSET\n    status = 'CONCLUIDO',\n    atualizado_em = CURRENT_TIMESTAMP,\n    concluido_em = CURRENT_TIMESTAMP,\n    mensagem_erro = NULL\nWHERE idempotency_key = $1\nRETURNING\n    id AS evento_id,\n    idempotency_key,\n    correlation_id::text AS correlation_id,\n    obra_codigo,\n    status AS evento_status,\n    concluido_em,\n    COALESCE($2::jsonb, '{}'::jsonb) AS resposta_final;",
+        "options": {
+          "queryReplacement": "={{ [\n  $json.idempotency_key,\n  JSON.stringify($json.resposta_final)\n] }}"
+        }
+      },
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        2592,
+        144
+      ],
+      "id": "272bf053-651d-4cb6-8dcc-afb9f23d38f5",
+      "name": "Atualizar Evento como Concluído",
+      "credentials": {
+        "postgres": {
+          "id": "N4gqDQWfI7uqxr5f",
+          "name": "Postgres Docker - garcia_db"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const respostaFinal = $input.first().json;\n\n// Recupera os identificadores da mesma execução\nconst evento = $('Consolidar Idempotência').first().json;\n\nreturn [\n  {\n    json: {\n      idempotency_key: evento.idempotency_key || null,\n      correlation_id: evento.correlation_id || null,\n      evento_id: evento.evento_id || null,\n\n      obra_codigo:\n        respostaFinal.obra_codigo ||\n        evento.obra_codigo ||\n        null,\n\n      tipo_entrada:\n        evento.tipo_entrada ||\n        null,\n\n      resposta_final: respostaFinal\n    }\n  }\n];\n"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2384,
+        -64
+      ],
+      "id": "ba719429-762f-4a87-b5a4-364346fec9be",
+      "name": "Preparar Finalização Evento"
+    },
+    {
+      "parameters": {
+        "jsCode": "const respostaAgente = $input.first().json;\n\n// Ajuste o nome se o seu nó tiver outro nome\nconst entrada = $items(\"Normalizar WhatsApp\")[0].json;\n\nreturn [\n  {\n    json: {\n      status: \"whatsapp_processado\",\n      tipo_entrada: entrada.tipo_entrada,\n      obra_codigo: entrada.obra_codigo,\n      canal: entrada.canal,\n      telefone_origem: entrada.telefone_origem,\n      nome_contato: entrada.nome_contato,\n      mensagem: \"Mensagem recebida e encaminhada pelo Agente 00.\",\n      resposta_agente_destino: respostaAgente\n    }\n  }\n];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2032,
+        -304
+      ],
+      "id": "bf29438d-c781-472a-9a36-a7343096a5c5",
+      "name": "Montar Resposta RDO"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Loop over input items and add a new field called 'myNewField' to the JSON of each one\nfor (const item of $input.all()) {\n  item.json.myNewField = 1;\n}\n\nreturn $input.all();"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2048,
+        -64
+      ],
+      "id": "1401da93-8fdf-4269-b51a-4d7334689d46",
+      "name": "Montar Resposta"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Loop over input items and add a new field called 'myNewField' to the JSON of each one\nfor (const item of $input.all()) {\n  item.json.myNewField = 1;\n}\n\nreturn $input.all();"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2048,
+        192
+      ],
+      "id": "76da0be3-4c61-4fae-8581-d6f3927f004d",
+      "name": "Montar mensagem geral"
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Webhook": {
+      "main": [
+        [
+          {
+            "node": "Normalizar WhatsApp",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Normalizar WhatsApp": {
+      "main": [
+        [
+          {
+            "node": "Gerar Identificadores",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Switch": {
+      "main": [
+        [
+          {
+            "node": "Acionar agente 02",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Acionar agente 03",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Montar mensagem geral",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Acionar agente 02": {
+      "main": [
+        [
+          {
+            "node": "Montar Resposta RDO",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Respond to Webhook": {
+      "main": [
+        []
+      ]
+    },
+    "Acionar agente 03": {
+      "main": [
+        [
+          {
+            "node": "Montar Resposta",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Gerar Identificadores": {
+      "main": [
+        [
+          {
+            "node": "Execute a SQL query",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Merge Idempotência": {
+      "main": [
+        []
+      ]
+    },
+    "Consolidar Idempotência": {
+      "main": [
+        [
+          {
+            "node": "If",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "If": {
+      "main": [
+        [
+          {
+            "node": "Switch",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Montar Resposta Duplicado",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Montar Resposta Duplicado": {
+      "main": [
+        [
+          {
+            "node": "Respond to Webhook1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Execute a SQL query": {
+      "main": [
+        [
+          {
+            "node": "Consolidar Idempotência",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Atualizar Evento como Concluído": {
+      "main": [
+        [
+          {
+            "node": "Respond to Webhook",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Preparar Finalização Evento": {
+      "main": [
+        [
+          {
+            "node": "Atualizar Evento como Concluído",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Montar Resposta RDO": {
+      "main": [
+        [
+          {
+            "node": "Preparar Finalização Evento",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Montar Resposta": {
+      "main": [
+        [
+          {
+            "node": "Preparar Finalização Evento",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Montar mensagem geral": {
+      "main": [
+        [
+          {
+            "node": "Preparar Finalização Evento",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": true,
+  "settings": {
+    "executionOrder": "v1",
+    "availableInMCP": false
+  },
+  "versionId": "d5b8d1c5-a836-4b7d-af2d-9471849c9fdb",
+  "meta": {
+    "templateCredsSetupCompleted": true,
+    "instanceId": "8413b6be73d2e2e10307909a55f83a3ab488d840252474a03ecb97980f038cc0"
+  },
+  "id": "v5eBLxkXM1aFxHhXNqZjw",
+  "tags": []
+}
