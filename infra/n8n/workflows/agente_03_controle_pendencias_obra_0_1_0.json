@@ -1,0 +1,683 @@
+{
+  "name": "Agente 03 — Controle de Pendências da Obra",
+  "nodes": [
+    {
+      "parameters": {
+        "jsCode": "const inputOriginal = $input.first().json;\nconst input = inputOriginal.body ?? inputOriginal;\n\nconst descricao = String(input.descricao || '').trim();\nconst descricaoLower = descricao.toLowerCase();\n\nfunction classificarCategoria(texto) {\n  if (texto.includes('foto') || texto.includes('registro fotográfico')) return 'DOCUMENTACAO';\n  if (texto.includes('material') || texto.includes('entrega') || texto.includes('nota')) return 'SUPRIMENTOS';\n  if (texto.includes('segurança') || texto.includes('epi') || texto.includes('risco')) return 'SEGURANCA';\n  if (\n  texto.includes('projeto executivo') ||\n  texto.includes('desenho técnico') ||\n  texto.includes('desenho tecnico') ||\n  texto.includes('revisão de projeto') ||\n  texto.includes('revisao de projeto')\n) {\n  return 'PROJETO';\n}\n  if (texto.includes('execução') || texto.includes('alvenaria') || texto.includes('concretagem')) return 'EXECUCAO';\n  return 'GERAL';\n}\n\nfunction classificarPrioridade(texto) {\n  if (texto.includes('crítico') || texto.includes('critico') || texto.includes('risco') || texto.includes('segurança')) {\n    return 'CRITICA';\n  }\n\n  if (texto.includes('necessário') || texto.includes('necessario') || texto.includes('confirmar') || texto.includes('não foram enviadas')) {\n    return 'ALTA';\n  }\n\n  if (texto.includes('verificar') || texto.includes('pendente')) {\n    return 'NORMAL';\n  }\n\n  return 'BAIXA';\n}\n\nconst categoria = classificarCategoria(descricaoLower);\nconst prioridade = classificarPrioridade(descricaoLower);\n\nlet acao_recomendada = 'Registrar pendência e acompanhar até resolução.';\n\nif (categoria === 'DOCUMENTACAO') {\n  acao_recomendada = 'Solicitar complementação documental ou envio das evidências faltantes.';\n}\n\nif (categoria === 'SUPRIMENTOS') {\n  acao_recomendada = 'Conferir documentação de entrega, nota fiscal, quantitativos e impacto no cronograma.';\n}\n\nif (categoria === 'SEGURANCA') {\n  acao_recomendada = 'Acionar responsável técnico imediatamente para verificação das condições de segurança.';\n}\n\nif (categoria === 'EXECUCAO') {\n  acao_recomendada = 'Solicitar validação da frente de serviço e registro das evidências de execução.';\n}\n\nconst historico = {\n  eventos: [\n    {\n      data: new Date().toISOString(),\n      status: 'ABERTA',\n      descricao: 'Pendência registrada automaticamente pelo Agente 03.',\n      agente: 'Agente Controle de Pendências'\n    }\n  ]\n};\n\nreturn [\n  {\n    json: {\n      obra_codigo: input.obra_codigo || null,\n\n      origem: input.origem || 'WEBHOOK',\n      origem_tipo: input.origem_tipo || null,\n      origem_id: input.origem_id || null,\n\n      data_identificacao: input.data_identificacao || null,\n      responsavel_identificacao: input.responsavel_identificacao || null,\n\n      descricao,\n      categoria,\n      prioridade,\n      status_pendencia: 'ABERTA',\n\n      responsavel_acao: input.responsavel_acao || null,\n      prazo_limite: input.prazo_limite || null,\n\n      acao_recomendada,\n      observacoes: null,\n\n      evidencias: input.evidencias || {},\n      historico,\n      payload_original: {\n        entrada_original: inputOriginal,\n        entrada_normalizada: input\n      },\n\n      agente_nome: 'Agente Controle de Pendências da Obra',\n      agente_versao: '0.1.0',\n      modo_processamento: 'MOCK',\n      data_processamento: new Date().toISOString()\n    }\n  }\n];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        416,
+        0
+      ],
+      "id": "6c2c80b8-d459-4e7d-b629-c4a5529a385a",
+      "name": "Code Mock Classificador de Pendência"
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "218c54f9-fd23-497a-8a98-c9e7a3a9a953",
+              "name": "body.obra_codigo",
+              "value": "={{ $json.body.obra_codigo }}",
+              "type": "string"
+            },
+            {
+              "id": "5479a572-6b56-428f-9e93-9def5a2d074d",
+              "name": "body.origem",
+              "value": "={{ $json.body.origem }}",
+              "type": "string"
+            },
+            {
+              "id": "ab9c8469-1323-4088-a650-47c0767f98e0",
+              "name": "body.origem_tipo",
+              "value": "={{ $json.body.origem_tipo }}",
+              "type": "string"
+            },
+            {
+              "id": "797ca50f-f435-4463-93cd-504e90181695",
+              "name": "body.origem_id",
+              "value": "={{ $json.body.origem_id }}",
+              "type": "string"
+            },
+            {
+              "id": "fa2fba84-0f2b-40e8-924c-189240ef0250",
+              "name": "body.data_identificacao",
+              "value": "={{ $json.body.data_identificacao }}",
+              "type": "string"
+            },
+            {
+              "id": "e392d5ae-3a09-4ae6-91d6-e319bbacb4bb",
+              "name": "body.responsavel_identificacao",
+              "value": "={{ $json.body.responsavel_identificacao }}",
+              "type": "string"
+            },
+            {
+              "id": "97baaaf0-3317-4501-9552-227dd83e11d9",
+              "name": "body.descricao",
+              "value": "={{ $json.body.descricao }}",
+              "type": "string"
+            },
+            {
+              "id": "cffee523-6a20-463b-bc1b-92629ea7c5a7",
+              "name": "body.responsavel_acao",
+              "value": "={{ $json.body.responsavel_acao }}",
+              "type": "string"
+            },
+            {
+              "id": "7aca56ac-9395-411e-8536-de30dfc27feb",
+              "name": "body.prazo_limite",
+              "value": "={{ $json.body.prazo_limite }}",
+              "type": "string"
+            },
+            {
+              "id": "8c5f9d91-504d-4ab5-80a0-1e4b1b7710bd",
+              "name": "body.evidencias.documento_origem",
+              "value": "={{ $json.body.evidencias.documento_origem }}",
+              "type": "string"
+            },
+            {
+              "id": "c84c002f-f2de-4385-9621-ed44d07c2229",
+              "name": "body.evidencias.observacao",
+              "value": "={{ $json.body.evidencias.observacao }}",
+              "type": "string"
+            },
+            {
+              "id": "a8ceba97-d162-4cf6-8627-2b82efa148db",
+              "name": "webhookUrl",
+              "value": "={{ $json.webhookUrl }}",
+              "type": "string"
+            },
+            {
+              "id": "f388d907-0a90-4509-a87c-a7cabe52f5ed",
+              "name": "executionMode",
+              "value": "={{ $json.executionMode }}",
+              "type": "string"
+            },
+            {
+              "id": "87751d18-cf8e-4dbc-9db6-759421c8a243",
+              "name": "headers.host",
+              "value": "={{ $json.headers.host }}",
+              "type": "string"
+            },
+            {
+              "id": "99f20d55-faf5-4e42-9e54-acb7d931996f",
+              "name": "headers.user-agent",
+              "value": "={{ $json.headers.user-agent }}",
+              "type": "string"
+            },
+            {
+              "id": "47d4b339-c637-413d-9d86-94a6a9255e92",
+              "name": "headers.accept",
+              "value": "={{ $json.headers.accept }}",
+              "type": "string"
+            },
+            {
+              "id": "b45bab36-5676-4c70-a66c-86a074c46ddf",
+              "name": "headers.content-type",
+              "value": "={{ $json.headers.content-type }}",
+              "type": "string"
+            },
+            {
+              "id": "668fff27-e0ec-42f8-bd80-d9df6085ff7f",
+              "name": "headers.content-length",
+              "value": "={{ $json.headers.content-length }}",
+              "type": "string"
+            },
+            {
+              "id": "6d86fcc4-13bf-4fd5-9020-6fbe8b9a7a1a",
+              "name": "body.obra_codigo",
+              "value": "={{ $json.body.obra_codigo }}",
+              "type": "string"
+            },
+            {
+              "id": "6423571f-edf6-477e-aa73-4ef94eb07608",
+              "name": "body.origem",
+              "value": "={{ $json.body.origem }}",
+              "type": "string"
+            },
+            {
+              "id": "6b5f1644-71e6-4b60-bd85-e9eb653a9d20",
+              "name": "body.origem_tipo",
+              "value": "={{ $json.body.origem_tipo }}",
+              "type": "string"
+            },
+            {
+              "id": "482a2439-ae7f-46ca-ac46-b09740a5a6b7",
+              "name": "body.origem_id",
+              "value": "={{ $json.body.origem_id }}",
+              "type": "string"
+            },
+            {
+              "id": "7e6bb4da-a2cd-4b29-bfbf-30fd1102631f",
+              "name": "body.data_identificacao",
+              "value": "={{ $json.body.data_identificacao }}",
+              "type": "string"
+            },
+            {
+              "id": "efa1ee1f-4617-410a-b370-abb6bdebaa3c",
+              "name": "body.responsavel_identificacao",
+              "value": "={{ $json.body.responsavel_identificacao }}",
+              "type": "string"
+            },
+            {
+              "id": "9623297a-f383-4630-b0f0-6fa2abd643d8",
+              "name": "body.descricao",
+              "value": "={{ $json.body.descricao }}",
+              "type": "string"
+            },
+            {
+              "id": "f3e866b4-94cb-4015-8be6-c304a57294cb",
+              "name": "body.responsavel_acao",
+              "value": "={{ $json.body.responsavel_acao }}",
+              "type": "string"
+            },
+            {
+              "id": "af31ed99-4f8c-44e6-abba-85e230ff1cd1",
+              "name": "body.prazo_limite",
+              "value": "={{ $json.body.prazo_limite }}",
+              "type": "string"
+            },
+            {
+              "id": "6c4abdc2-312a-4118-94c9-84841a222389",
+              "name": "body.evidencias.documento_origem",
+              "value": "={{ $json.body.evidencias.documento_origem }}",
+              "type": "string"
+            },
+            {
+              "id": "f18cd1e9-32c0-4e4c-80dd-8b0660692353",
+              "name": "body.evidencias.observacao",
+              "value": "={{ $json.body.evidencias.observacao }}",
+              "type": "string"
+            },
+            {
+              "id": "f8b7ea3f-d1fc-4c36-8fb3-8561a98d55a9",
+              "name": "data_recebimento",
+              "value": "={{ $now.toISO() }}",
+              "type": "string"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        208,
+        0
+      ],
+      "id": "1de7c975-d18c-47ae-93bb-0c62fee2fcd9",
+      "name": "Set Dados Básicos Pendência"
+    },
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "registrar-pendencia",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2.1,
+      "position": [
+        0,
+        0
+      ],
+      "id": "181936c5-176c-4d41-9238-0c300bb503c8",
+      "name": "Webhook Pendência",
+      "webhookId": "89616687-f01b-414c-9ab3-b7c1820215b8"
+    },
+    {
+      "parameters": {
+        "jsCode": "const item = $input.first().json;\n\nfunction safeObject(value) {\n  if (!value) return {};\n\n  if (typeof value === 'object') {\n    return value;\n  }\n\n  try {\n    return JSON.parse(value);\n  } catch (error) {\n    return {\n      valor_original: String(value)\n    };\n  }\n}\n\nreturn [\n  {\n    json: {\n      ...item,\n\n      evidencias: safeObject(item.evidencias),\n      historico: safeObject(item.historico),\n      payload_original: safeObject(item.payload_original),\n\n      data_identificacao: item.data_identificacao || null,\n      prazo_limite: item.prazo_limite || null,\n      data_processamento: item.data_processamento || new Date().toISOString()\n    }\n  }\n];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        624,
+        0
+      ],
+      "id": "2c783d06-7ab9-4bfa-a2a3-c0a4001825e3",
+      "name": "Preparar Pendência para PostgreSQL"
+    },
+    {
+      "parameters": {
+        "schema": {
+          "__rl": true,
+          "mode": "list",
+          "value": "public"
+        },
+        "table": {
+          "__rl": true,
+          "value": "pendencias_obra",
+          "mode": "list",
+          "cachedResultName": "pendencias_obra"
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "obra_codigo": "={{ $json.obra_codigo }}",
+            "origem": "={{ $json.origem }}",
+            "origem_tipo": "={{ $json.origem_tipo }}",
+            "origem_id": "={{ $json.origem_id }}",
+            "data_identificacao": "2026-06-01T17:32:04",
+            "responsavel_identificacao": "={{ $json.responsavel_identificacao }}",
+            "descricao": "={{ $json.descricao }}",
+            "categoria": "={{ $json.categoria }}",
+            "prioridade": "={{ $json.prioridade }}",
+            "status_pendencia": "={{ $json.status_pendencia }}",
+            "responsavel_acao": "={{ $json.responsavel_acao }}",
+            "prazo_limite": "2026-06-01T17:34:42",
+            "acao_recomendada": "={{ $json.acao_recomendada }}",
+            "observacoes": "={{ $json.observacoes }}",
+            "evidencias": "={{ $json.evidencias }}",
+            "historico": "={{ $json.historico }}",
+            "payload_original": "={{ $json.payload_original }}",
+            "agente_nome": "={{ $json.agente_nome }}",
+            "agente_versao": "={{ $json.agente_versao }}",
+            "modo_processamento": "={{ $json.modo_processamento }}",
+            "data_processamento": "2026-06-01T17:38:29"
+          },
+          "matchingColumns": [
+            "id"
+          ],
+          "schema": [
+            {
+              "id": "id",
+              "displayName": "id",
+              "required": false,
+              "defaultMatch": true,
+              "display": true,
+              "type": "number",
+              "canBeUsedToMatch": true,
+              "removed": true
+            },
+            {
+              "id": "id_pendencia",
+              "displayName": "id_pendencia",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": true
+            },
+            {
+              "id": "obra_codigo",
+              "displayName": "obra_codigo",
+              "required": true,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "origem",
+              "displayName": "origem",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "origem_tipo",
+              "displayName": "origem_tipo",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "origem_id",
+              "displayName": "origem_id",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "data_identificacao",
+              "displayName": "data_identificacao",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "dateTime",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "responsavel_identificacao",
+              "displayName": "responsavel_identificacao",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "descricao",
+              "displayName": "descricao",
+              "required": true,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "categoria",
+              "displayName": "categoria",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "prioridade",
+              "displayName": "prioridade",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "status_pendencia",
+              "displayName": "status_pendencia",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "responsavel_acao",
+              "displayName": "responsavel_acao",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "prazo_limite",
+              "displayName": "prazo_limite",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "dateTime",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "acao_recomendada",
+              "displayName": "acao_recomendada",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "observacoes",
+              "displayName": "observacoes",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "evidencias",
+              "displayName": "evidencias",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "object",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "historico",
+              "displayName": "historico",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "object",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "payload_original",
+              "displayName": "payload_original",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "object",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "agente_nome",
+              "displayName": "agente_nome",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "agente_versao",
+              "displayName": "agente_versao",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "modo_processamento",
+              "displayName": "modo_processamento",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "data_processamento",
+              "displayName": "data_processamento",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "dateTime",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "criado_em",
+              "displayName": "criado_em",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "dateTime",
+              "canBeUsedToMatch": true,
+              "removed": true
+            },
+            {
+              "id": "atualizado_em",
+              "displayName": "atualizado_em",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "dateTime",
+              "canBeUsedToMatch": true,
+              "removed": true
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        832,
+        0
+      ],
+      "id": "7f5706e0-5826-470f-882f-360af51235d3",
+      "name": "Insert rows in a table",
+      "credentials": {
+        "postgres": {
+          "id": "N4gqDQWfI7uqxr5f",
+          "name": "Postgres Docker - garcia_db"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 3
+          },
+          "conditions": [
+            {
+              "id": "8bfed350-725e-41b1-a829-32397e51f1e3",
+              "leftValue": "={{ $json.prioridade }}",
+              "rightValue": "=ALTA",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            },
+            {
+              "id": "22b54916-0955-4ccf-88e1-3bdce91ef1ba",
+              "leftValue": "={{ $json.prioridade }}",
+              "rightValue": "CRITICA",
+              "operator": {
+                "type": "string",
+                "operation": "equals",
+                "name": "filter.operator.equals"
+              }
+            }
+          ],
+          "combinator": "or"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        1040,
+        0
+      ],
+      "id": "9ae4482d-b3fc-43ff-a49b-a5550eba4945",
+      "name": "If"
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={\n  \"status\": \"pendencia_registrada\",\n  \"obra_codigo\": \"{{ $json.obra_codigo }}\",\n  \"categoria\": \"{{ $json.categoria }}\",\n  \"prioridade\": \"{{ $json.prioridade }}\",\n  \"status_pendencia\": \"{{ $json.status_pendencia }}\",\n  \"responsavel_acao\": \"{{ $json.responsavel_acao }}\",\n  \"prazo_limite\": \"{{ $json.prazo_limite }}\",\n  \"mensagem\": \"Pendência registrada com sucesso.\"\n}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.5,
+      "position": [
+        1248,
+        0
+      ],
+      "id": "c0bf29b4-ca17-454b-98ef-dfc9bb125c7c",
+      "name": "Respond to Webhook"
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Set Dados Básicos Pendência": {
+      "main": [
+        [
+          {
+            "node": "Code Mock Classificador de Pendência",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Webhook Pendência": {
+      "main": [
+        [
+          {
+            "node": "Set Dados Básicos Pendência",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Code Mock Classificador de Pendência": {
+      "main": [
+        [
+          {
+            "node": "Preparar Pendência para PostgreSQL",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Preparar Pendência para PostgreSQL": {
+      "main": [
+        [
+          {
+            "node": "Insert rows in a table",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Insert rows in a table": {
+      "main": [
+        [
+          {
+            "node": "If",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "If": {
+      "main": [
+        [
+          {
+            "node": "Respond to Webhook",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Respond to Webhook",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": true,
+  "settings": {
+    "executionOrder": "v1",
+    "availableInMCP": false
+  },
+  "versionId": "6a849cfd-17de-4920-bfb7-24821014ffef",
+  "meta": {
+    "templateCredsSetupCompleted": true,
+    "instanceId": "8413b6be73d2e2e10307909a55f83a3ab488d840252474a03ecb97980f038cc0"
+  },
+  "id": "giJNd0HQTIKxsNZ9rZjpb",
+  "tags": []
+}

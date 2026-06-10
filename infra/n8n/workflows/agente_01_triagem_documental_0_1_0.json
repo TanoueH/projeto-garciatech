@@ -1,0 +1,706 @@
+{
+  "name": "Agente 01 - Triagem Documental",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "triagem-documental",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2.1,
+      "position": [
+        0,
+        0
+      ],
+      "id": "8bbfe318-b48d-4fe5-a56f-75b2dc9d01c7",
+      "name": "Webhook",
+      "webhookId": "176ee09c-b848-4ede-9f99-87a135296d26"
+    },
+    {
+      "parameters": {
+        "promptType": "define",
+        "text": "=Você é um Agente de Triagem Documental especializado em gerenciamento de obras de engenharia civil.\n\nSua função é analisar mensagens, documentos, relatórios, e-mails, planilhas ou descrições enviadas pela equipe da obra.\n\nDados recebidos:\n\nCódigo da obra:\n{{ $json.obra_codigo }}\n\nResponsável informado:\n{{ $json.responsavel }}\n\nMensagem/conteúdo recebido:\n{{ $json.mensagem }}\n\nOrigem:\n{{ $json.origem }}\n\nNome original:\n{{ $json.nome_original }}\n\nClassifique o conteúdo recebido e retorne exclusivamente um JSON válido.\n\nRegras obrigatórias:\n1. Não invente informações.\n2. Quando uma informação não estiver clara, use null.\n3. Classifique a prioridade como BAIXA, NORMAL, ALTA ou CRITICA.\n4. Classifique o status como VALIDO, INCOMPLETO, PENDENTE_REVISAO ou INVALIDO.\n5. Se houver ausência de informação relevante, registre em pendencias_identificadas.\n6. A resposta deve ser somente JSON válido.\n7. Não escreva markdown.\n8. Não escreva explicações fora do JSON.\n9. O campo pendencias_identificadas deve ser sempre uma lista.\n10. O nome_padronizado deve seguir o padrão:\nOBRA-CODIGO_DATA_TIPO_DOCUMENTO_RESPONSAVEL.extensao\n\nTipos de documento permitidos:\nRELATORIO_DIARIO, RELATORIO_SEMANAL, MEDICAO, ORCAMENTO, NOTA_FISCAL, CONTRATO, PROJETO, CRONOGRAMA, FOTO_OBRA, ATA_REUNIAO, EMAIL_TECNICO, DOCUMENTO_ADMINISTRATIVO, OUTROS.\n\nCategorias permitidas:\nEXECUCAO, PLANEJAMENTO, FINANCEIRO, SUPRIMENTOS, QUALIDADE, SEGURANCA, PROJETO, ADMINISTRATIVO, CLIENTE, FORNECEDOR.\n\nRetorne exatamente neste formato:\n\n{\n  \"obra_codigo\": null,\n  \"tipo_documento\": null,\n  \"categoria\": null,\n  \"data_documento\": null,\n  \"responsavel\": null,\n  \"assunto\": null,\n  \"descricao_resumida\": null,\n  \"prioridade\": null,\n  \"status\": null,\n  \"pendencias_identificadas\": [],\n  \"nome_padronizado\": null,\n  \"acao_recomendada\": null\n}",
+        "options": {}
+      },
+      "type": "@n8n/n8n-nodes-langchain.agent",
+      "typeVersion": 3.1,
+      "position": [
+        720,
+        224
+      ],
+      "id": "da5ac564-d944-4a50-94b1-3f943094e93c",
+      "name": "AI Agent"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 3
+          },
+          "conditions": [
+            {
+              "id": "01a1569e-4e54-42cd-b50a-36b63b03373e",
+              "leftValue": "={{ $json.tipo_documento === \"RELATORIO_DIARIO\" }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        1392,
+        0
+      ],
+      "id": "9c4ce602-58c3-4b99-8d33-bb13000f1aec",
+      "name": "If"
+    },
+    {
+      "parameters": {
+        "options": {}
+      },
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.5,
+      "position": [
+        2080,
+        240
+      ],
+      "id": "b7c45d29-f100-4470-9f7e-139b5c552507",
+      "name": "Respond to Webhook"
+    },
+    {
+      "parameters": {
+        "model": {
+          "__rl": true,
+          "mode": "list",
+          "value": "gpt-4.1-mini"
+        },
+        "builtInTools": {},
+        "options": {}
+      },
+      "type": "@n8n/n8n-nodes-langchain.lmChatOpenAi",
+      "typeVersion": 1.3,
+      "position": [
+        640,
+        400
+      ],
+      "id": "4b58a544-625e-4da5-ad86-c5955323f265",
+      "name": "Agente de Triagem Documental",
+      "credentials": {
+        "openAiApi": {
+          "id": "5Cw7AtpXUgMgnKfi",
+          "name": "OpenAi account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const input = $input.first().json;\n\n// O AI Agent pode retornar em campos diferentes dependendo da configuração\nlet raw =\n  input.output ??\n  input.text ??\n  input.response ??\n  input.message ??\n  input.result ??\n  input;\n\n// Se vier como string, limpar markdown e converter em JSON\nlet data;\n\nif (typeof raw === 'string') {\n  raw = raw\n    .replace(/```json/gi, '')\n    .replace(/```/g, '')\n    .trim();\n\n  try {\n    data = JSON.parse(raw);\n  } catch (error) {\n    throw new Error(`Erro ao converter resposta da IA em JSON. Resposta recebida: ${raw}`);\n  }\n} else if (typeof raw === 'object') {\n  data = raw;\n} else {\n  throw new Error('Formato inesperado de resposta da IA.');\n}\n\n// Garantir array de pendências\nif (!Array.isArray(data.pendencias_identificadas)) {\n  data.pendencias_identificadas = data.pendencias_identificadas\n    ? [String(data.pendencias_identificadas)]\n    : [];\n}\n\n// Normalização básica\nreturn [\n  {\n    json: {\n      obra_codigo: data.obra_codigo ?? input.obra_codigo ?? null,\n      tipo_documento: data.tipo_documento ?? null,\n      categoria: data.categoria ?? null,\n      data_documento: data.data_documento ?? null,\n      responsavel: data.responsavel ?? input.responsavel ?? null,\n      assunto: data.assunto ?? null,\n      descricao_resumida: data.descricao_resumida ?? null,\n      prioridade: data.prioridade ?? 'NORMAL',\n      status: data.status ?? 'PENDENTE_REVISAO',\n      pendencias_identificadas: data.pendencias_identificadas,\n      possui_pendencias: data.pendencias_identificadas.length > 0,\n      nome_original: input.nome_original ?? null,\n      nome_padronizado: data.nome_padronizado ?? null,\n      origem: input.origem ?? 'WEBHOOK',\n      acao_recomendada: data.acao_recomendada ?? null\n    }\n  }\n];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        688,
+        0
+      ],
+      "id": "a8749ec2-90e7-4de1-b3bd-32ea4dfe5f4e",
+      "name": "Code: Parse JSON"
+    },
+    {
+      "parameters": {
+        "schema": {
+          "__rl": true,
+          "value": "public",
+          "mode": "list",
+          "cachedResultName": "public"
+        },
+        "table": {
+          "__rl": true,
+          "value": "documentos_obra",
+          "mode": "list",
+          "cachedResultName": "documentos_obra"
+        },
+        "columns": {
+          "mappingMode": "autoMapInputData",
+          "value": {
+            "id": 0
+          },
+          "matchingColumns": [
+            "id"
+          ],
+          "schema": [
+            {
+              "id": "id",
+              "displayName": "id",
+              "required": false,
+              "defaultMatch": true,
+              "display": true,
+              "type": "number",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "obra_codigo",
+              "displayName": "obra_codigo",
+              "required": true,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "tipo_documento",
+              "displayName": "tipo_documento",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "categoria",
+              "displayName": "categoria",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "data_documento",
+              "displayName": "data_documento",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "dateTime",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "responsavel",
+              "displayName": "responsavel",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "assunto",
+              "displayName": "assunto",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "descricao_resumida",
+              "displayName": "descricao_resumida",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "prioridade",
+              "displayName": "prioridade",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "status",
+              "displayName": "status",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "pendencias_identificadas",
+              "displayName": "pendencias_identificadas",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "object",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "nome_original",
+              "displayName": "nome_original",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "nome_padronizado",
+              "displayName": "nome_padronizado",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "caminho_arquivo",
+              "displayName": "caminho_arquivo",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "origem",
+              "displayName": "origem",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "acao_recomendada",
+              "displayName": "acao_recomendada",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "criado_em",
+              "displayName": "criado_em",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "dateTime",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "possui_pendencias",
+              "displayName": "possui_pendencias",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "boolean",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "id_documento",
+              "displayName": "id_documento",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "data_processamento",
+              "displayName": "data_processamento",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "dateTime",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "payload_original",
+              "displayName": "payload_original",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "object",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "agente_nome",
+              "displayName": "agente_nome",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "agente_versao",
+              "displayName": "agente_versao",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "modo_processamento",
+              "displayName": "modo_processamento",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "workflow_nome",
+              "displayName": "workflow_nome",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "workflow_versao",
+              "displayName": "workflow_versao",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "n8n_execution_id",
+              "displayName": "n8n_execution_id",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        1152,
+        0
+      ],
+      "id": "72440e6a-6481-4261-8ee2-44c48ad46b52",
+      "name": " Insert documentos_obra",
+      "credentials": {
+        "postgres": {
+          "id": "N4gqDQWfI7uqxr5f",
+          "name": "Postgres Docker - garcia_db"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "sendTo": "h231761@dac.unicamp.com.br, renato.ogarcia@gmail.com",
+        "subject": "Teste n8n",
+        "message": "Testando n8n Agente AI ",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2.2,
+      "position": [
+        1888,
+        240
+      ],
+      "id": "22ed62c3-5d85-465a-b858-850e38551693",
+      "name": "Enviar alerta 2",
+      "webhookId": "94b10111-c7fb-4078-b7cf-eda9c865a8d8",
+      "credentials": {
+        "gmailOAuth2": {
+          "id": "RuyVRPsfFzqWC4x6",
+          "name": "Gmail account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const input = $input.first().json;\n\nconst mensagem = (input.mensagem || '').toLowerCase();\n\nlet tipo_documento = 'OUTROS';\nlet categoria = 'ADMINISTRATIVO';\nlet prioridade = 'NORMAL';\nlet status = 'VALIDO';\nlet pendencias = [];\n\nif (mensagem.includes('relatório diário') || mensagem.includes('relatorio diario')) {\n  tipo_documento = 'RELATORIO_DIARIO';\n  categoria = 'EXECUCAO';\n}\n\nif (mensagem.includes('não foram enviadas fotos') || mensagem.includes('nao foram enviadas fotos')) {\n  status = 'INCOMPLETO';\n  pendencias.push('Não foram enviadas fotos da execução.');\n}\n\nconst dataMatch = input.mensagem.match(/(\\d{2})\\/(\\d{2})\\/(\\d{4})/);\nconst data_documento = dataMatch\n  ? `${dataMatch[3]}-${dataMatch[2]}-${dataMatch[1]}`\n  : null;\n\nconst responsavel = (input.responsavel || '').toUpperCase();\nconst obra_codigo = input.obra_codigo || null;\n\nreturn [\n  {\n    json: {\n      output: JSON.stringify({\n        obra_codigo,\n        tipo_documento,\n        categoria,\n        data_documento,\n        responsavel,\n        assunto: 'Relatório diário da obra Caio',\n        descricao_resumida: input.mensagem,\n        prioridade,\n        status,\n        pendencias_identificadas: pendencias,\n        nome_padronizado: `${obra_codigo}_${data_documento || 'SEM-DATA'}_${tipo_documento}_${responsavel || 'SEM-RESPONSAVEL'}.pdf`,\n        acao_recomendada: pendencias.length > 0\n          ? 'Arquivar como documento incompleto e solicitar complementação.'\n          : 'Arquivar documento.'\n      })\n    }\n  }\n];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        464,
+        0
+      ],
+      "id": "7bc19702-55d7-48b4-bc67-b24377a4c39e",
+      "name": "Code Mock"
+    },
+    {
+      "parameters": {
+        "jsCode": "let randomUUID;\n\ntry {\n  randomUUID = require('crypto').randomUUID;\n} catch (error) {\n  randomUUID = null;\n}\n\nfunction cleanText(value) {\n  if (value === undefined || value === null) return null;\n  return String(value).replace(/^=/, '').trim();\n}\n\nfunction fallbackUUID() {\n  return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, function (c) {\n    const r = Math.random() * 16 | 0;\n    const v = c === 'x' ? r : (r & 0x3 | 0x8);\n    return v.toString(16);\n  });\n}\n\nconst item = $input.first().json;\n\nconst id_documento = item.id_documento || (\n  randomUUID ? randomUUID() : fallbackUUID()\n);\n\nconst data_processamento = new Date().toISOString();\n\nlet pendencias = item.pendencias_identificadas;\n\nif (!Array.isArray(pendencias)) {\n  pendencias = pendencias ? [String(pendencias)] : [];\n}\n\nconst possui_pendencias = pendencias.length > 0;\n\nconst executionId =\n  typeof $execution !== 'undefined' && $execution?.id\n    ? String($execution.id)\n    : null;\n\nconst workflowName =\n  typeof $workflow !== 'undefined' && $workflow?.name\n    ? String($workflow.name)\n    : 'Agente de Triagem Documental';\n\nconst payloadOriginal = {\n  entrada: {\n    obra_codigo: item.obra_codigo ?? null,\n    responsavel: item.responsavel ?? null,\n    mensagem: item.mensagem ?? null,\n    origem: item.origem ?? null,\n    nome_original: item.nome_original ?? null,\n    data_recebimento: item.data_recebimento ?? null\n  },\n  classificacao: {\n    tipo_documento: item.tipo_documento ?? null,\n    categoria: item.categoria ?? null,\n    data_documento: item.data_documento ?? null,\n    assunto: item.assunto ?? null,\n    descricao_resumida: item.descricao_resumida ?? null,\n    prioridade: item.prioridade ?? null,\n    status: item.status ?? null,\n    pendencias_identificadas: pendencias,\n    nome_padronizado: item.nome_padronizado ?? null,\n    acao_recomendada: item.acao_recomendada ?? null\n  }\n};\n\nreturn [\n  {\n    json: {\n      ...item,\n\n      id_documento,\n      data_processamento,\n\n      pendencias_identificadas: JSON.stringify(pendencias),\n      possui_pendencias,\n\n      payload_original: JSON.stringify(payloadOriginal),\n\n      agente_nome: 'Agente de Triagem Documental',\n      agente_versao: '0.1.0',\n      modo_processamento: 'MOCK',\n\n      workflow_nome: workflowName,\n      workflow_versao: '0.1.0',\n      n8n_execution_id: executionId,\n\n      data_documento: item.data_documento || null\n    }\n  }\n];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        928,
+        0
+      ],
+      "id": "bbc4e7b8-8dd8-4447-b51b-a59fb65852c3",
+      "name": " Preparar para PostgreSQL"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://127.0.0.1:5678/webhook/gerar-rdo",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"obra_codigo\": \"{{ $json.obra_codigo }}\",\n  \"data_rdo\": \"{{ $json.data_rdo }}\",\n  \"responsavel\": \"{{ $json.responsavel }}\",\n  \"clima\": null,\n  \"condicoes_canteiro\": \"{{ $json.condicoes_canteiro }}\",\n  \"atividades\": \"{{ $json.atividades }}\",\n  \"mao_de_obra\": null,\n  \"equipamentos\": null,\n  \"materiais\": null,\n  \"ocorrencias\": \"{{ $json.ocorrencias }}\",\n  \"pendencias\": \"{{ $json.pendencias }}\",\n  \"origem\": \"{{ $json.origem }}\",\n  \"tipo_documento_origem\": \"{{ $json.tipo_documento_origem }}\"\n}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.3,
+      "position": [
+        1808,
+        -128
+      ],
+      "id": "842e841b-f6b1-44fe-bcae-f22db78cf985",
+      "name": "HTTP Request"
+    },
+    {
+      "parameters": {
+        "jsCode": "const atual = $input.first().json;\n\n// Busca a mensagem original diretamente do nó inicial normalizado\nconst base = $items(\"SET_DADOS_BASICOS_AGENTE_01\")[0].json;\n\nfunction cleanText(value) {\n  if (value === undefined || value === null) return '';\n  return String(value).replace(/^=/, '').trim();\n}\n\nfunction extractDateBR(text) {\n  const match = String(text || '').match(/(\\d{2})\\/(\\d{2})\\/(\\d{4})/);\n\n  if (!match) return null;\n\n  const [, dd, mm, yyyy] = match;\n  return `${yyyy}-${mm}-${dd}`;\n}\n\nconst mensagem =\n  cleanText(base.mensagem) ||\n  cleanText(base.body?.mensagem) ||\n  cleanText(atual.mensagem) ||\n  cleanText(atual.descricao_resumida) ||\n  cleanText(atual.assunto) ||\n  'Relatório diário recebido pela triagem documental.';\n\nconst texto = mensagem.toLowerCase();\n\nconst dataRdo =\n  extractDateBR(mensagem) ||\n  cleanText(base.data_rdo) ||\n  cleanText(base.data_documento) ||\n  cleanText(atual.data_documento) ||\n  new Date().toISOString().slice(0, 10);\n\nconst pendencias = [];\n\nif (\n  texto.includes('não foram enviadas fotos') ||\n  texto.includes('nao foram enviadas fotos') ||\n  texto.includes('sem fotos')\n) {\n  pendencias.push('Não foram enviadas fotos da execução.');\n}\n\nif (\n  texto.includes('necessário confirmar') ||\n  texto.includes('necessario confirmar') ||\n  texto.includes('conferir')\n) {\n  pendencias.push('Conferir informações pendentes mencionadas no relatório.');\n}\n\nreturn [\n  {\n    json: {\n      obra_codigo: cleanText(base.obra_codigo || atual.obra_codigo) || 'OBRA-001',\n      data_rdo: dataRdo,\n      responsavel: cleanText(base.responsavel || atual.responsavel) || 'Responsável não informado',\n\n      clima: null,\n      condicoes_canteiro: 'Não informado.',\n\n      atividades: mensagem,\n      mao_de_obra: null,\n      equipamentos: null,\n      materiais: null,\n\n      ocorrencias: pendencias.length > 0 ? pendencias.join('; ') : null,\n      pendencias: pendencias.length > 0 ? pendencias.join('; ') : null,\n\n      origem: 'AGENTE_01_TRIAGEM_DOCUMENTAL',\n      tipo_documento_origem: cleanText(atual.tipo_documento) || 'RELATORIO_DIARIO'\n    }\n  }\n];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1600,
+        -128
+      ],
+      "id": "6c670dfa-1f58-4ed2-a059-bae8f15c7529",
+      "name": "Montar Payload Agente 02"
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ $json }}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.5,
+      "position": [
+        2224,
+        -128
+      ],
+      "id": "34487baa-d8a2-45f5-9f21-e4584de29d91",
+      "name": "Respond to Webhook1"
+    },
+    {
+      "parameters": {
+        "jsCode": "const respostaAgente02 = $input.first().json;\n\nfunction cleanText(value) {\n  if (value === undefined || value === null) return null;\n  return String(value).replace(/^=/, '').trim();\n}\n\nfunction parseBoolean(value) {\n  if (value === true) return true;\n  if (value === false) return false;\n\n  if (value === undefined || value === null || value === '') return null;\n\n  const text = String(value).trim().toLowerCase();\n\n  if (['true', 't', '1', 'sim', 'yes'].includes(text)) return true;\n  if (['false', 'f', '0', 'nao', 'não', 'no'].includes(text)) return false;\n\n  return null;\n}\n\nreturn [\n  {\n    json: {\n      status: \"documento_processado\",\n      obra_codigo: cleanText(respostaAgente02.obra_codigo),\n      tipo_documento: \"RELATORIO_DIARIO\",\n      acionou_agente_02: true,\n\n      agente_02_status: respostaAgente02.status || null,\n      data_rdo: respostaAgente02.data_rdo || null,\n      status_rdo: respostaAgente02.status_rdo || null,\n      possui_pendencias: parseBoolean(respostaAgente02.possui_pendencias),\n      agente_03_acionado: parseBoolean(respostaAgente02.agente_03_acionado),\n\n      mensagem: \"Documento processado pela triagem documental e encaminhado ao Agente 02.\",\n      resposta_agente_02: respostaAgente02\n    }\n  }\n];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2016,
+        -128
+      ],
+      "id": "3e044c5a-95e8-40c3-beb9-786e55d53adc",
+      "name": "Montar Resposta Final Agente 01"
+    },
+    {
+      "parameters": {
+        "mode": "raw",
+        "jsonOutput": "={\n  \"obra_codigo\": \"{{ $json.body.obra_codigo }}\",\n  \"responsavel\": \"{{ $json.body.responsavel }}\",\n  \"mensagem\": \"{{ $json.body.mensagem }}\",\n  \"origem\": \"WEBHOOK\",\n  \"nome_original\": \"texto_recebido_webhook\",\n  \"data_recebimento\": \"{{ $now.toISO() }}\"\n}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        208,
+        0
+      ],
+      "id": "58a7d300-03be-4543-859d-91a856832aa0",
+      "name": "SET_DADOS_BASICOS_AGENTE_01"
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Webhook": {
+      "main": [
+        [
+          {
+            "node": "SET_DADOS_BASICOS_AGENTE_01",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "AI Agent": {
+      "main": [
+        []
+      ]
+    },
+    "If": {
+      "main": [
+        [
+          {
+            "node": "Montar Payload Agente 02",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Agente de Triagem Documental": {
+      "ai_languageModel": [
+        [
+          {
+            "node": "AI Agent",
+            "type": "ai_languageModel",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Code: Parse JSON": {
+      "main": [
+        [
+          {
+            "node": " Preparar para PostgreSQL",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    " Insert documentos_obra": {
+      "main": [
+        [
+          {
+            "node": "If",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Enviar alerta 2": {
+      "main": [
+        [
+          {
+            "node": "Respond to Webhook",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Code Mock": {
+      "main": [
+        [
+          {
+            "node": "Code: Parse JSON",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    " Preparar para PostgreSQL": {
+      "main": [
+        [
+          {
+            "node": " Insert documentos_obra",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "HTTP Request": {
+      "main": [
+        [
+          {
+            "node": "Montar Resposta Final Agente 01",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Montar Payload Agente 02": {
+      "main": [
+        [
+          {
+            "node": "HTTP Request",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Respond to Webhook1": {
+      "main": [
+        [
+          {
+            "node": "Enviar alerta 2",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Montar Resposta Final Agente 01": {
+      "main": [
+        [
+          {
+            "node": "Respond to Webhook1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "SET_DADOS_BASICOS_AGENTE_01": {
+      "main": [
+        [
+          {
+            "node": "Code Mock",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": true,
+  "settings": {
+    "executionOrder": "v1",
+    "availableInMCP": false
+  },
+  "versionId": "c0dbf7b9-ef5e-484c-80f4-53e6d4b28d17",
+  "meta": {
+    "templateCredsSetupCompleted": true,
+    "instanceId": "8413b6be73d2e2e10307909a55f83a3ab488d840252474a03ecb97980f038cc0"
+  },
+  "id": "RXXLEPUGED_1Qn7Cbyzil",
+  "tags": []
+}

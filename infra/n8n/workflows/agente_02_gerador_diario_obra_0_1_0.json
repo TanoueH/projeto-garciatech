@@ -1,0 +1,669 @@
+{
+  "name": "Agente 02 — Gerador de Diário de Obra",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "gerar-rdo",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2.1,
+      "position": [
+        0,
+        0
+      ],
+      "id": "a6bee923-57e2-4086-bd87-29221e32dbd9",
+      "name": "Webhook",
+      "webhookId": "f7e2ea63-4118-434a-86a2-f43af32e7f92"
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "e69dfa16-32f6-49ba-85de-4f578d681eee",
+              "name": "body.obra_codigo",
+              "value": "={{ $json.body.obra_codigo }}",
+              "type": "string"
+            },
+            {
+              "id": "5b362e22-6596-4a7e-953f-8259cc528f30",
+              "name": "body.data_rdo",
+              "value": "={{ $json.body.data_rdo || $json.data_rdo }}",
+              "type": "string"
+            },
+            {
+              "id": "73e1fc01-1687-4b81-a91e-85147700818a",
+              "name": "body.responsavel",
+              "value": "={{ $json.body.responsavel }}",
+              "type": "string"
+            },
+            {
+              "id": "35a436a5-e926-490c-8603-975a7043eb9d",
+              "name": "body.clima",
+              "value": "={{ $json.body.clima }}",
+              "type": "string"
+            },
+            {
+              "id": "77ec7795-eb03-4190-893e-f73e4eb4b5e4",
+              "name": "body.atividades",
+              "value": "={{ $json.body.atividades }}",
+              "type": "string"
+            },
+            {
+              "id": "e6820a90-773a-4c9d-af74-66443a2ee204",
+              "name": "body.mao_de_obra",
+              "value": "={{ $json.body.mao_de_obra }}",
+              "type": "string"
+            },
+            {
+              "id": "bb4c9c81-ecc7-46df-a192-934089410298",
+              "name": "body.equipamentos",
+              "value": "={{ $json.body.equipamentos }}",
+              "type": "string"
+            },
+            {
+              "id": "6e528219-314a-4748-b848-828a30879c23",
+              "name": "body.materiais",
+              "value": "={{ $json.body.materiais }}",
+              "type": "string"
+            },
+            {
+              "id": "95a1e6e1-96ca-4843-b73f-e581620b72a4",
+              "name": "body.ocorrencias",
+              "value": "={{ $json.body.ocorrencias }}",
+              "type": "string"
+            },
+            {
+              "id": "3f2608b1-c35f-4f1f-ac1b-2684430da0da",
+              "name": "body.pendencias",
+              "value": "={{ $json.body.pendencias }}",
+              "type": "string"
+            },
+            {
+              "id": "7aa9b3b3-9c7f-4fd0-8abe-a27047fb8918",
+              "name": "origem",
+              "value": "=WEBHOOK",
+              "type": "string"
+            },
+            {
+              "id": "78e06859-25e6-4711-9915-b255c5203699",
+              "name": "data_recebimento",
+              "value": "={{$now.toISO()}}",
+              "type": "string"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        208,
+        0
+      ],
+      "id": "d9d74bef-8944-4f25-a537-d93ece1d5076",
+      "name": "Set Dados Básicos RDO"
+    },
+    {
+      "parameters": {
+        "jsCode": "const inputOriginal = $input.first().json;\n\n// Aceita dados achatados ou vindos diretamente do Webhook em body\nconst input = inputOriginal.body ?? inputOriginal;\n\nfunction cleanText(value) {\n  if (value === undefined || value === null) return '';\n  return String(value).replace(/^=/, '').trim();\n}\n\nfunction extractDateBR(text) {\n  const match = String(text || '').match(/(\\d{2})\\/(\\d{2})\\/(\\d{4})/);\n\n  if (!match) return null;\n\n  const [, dd, mm, yyyy] = match;\n  return `${yyyy}-${mm}-${dd}`;\n}\n\nfunction formatDate(value) {\n  if (!value) {\n    return new Date().toISOString().slice(0, 10);\n  }\n\n  const cleaned = cleanText(value);\n\n  if (/^\\d{4}-\\d{2}-\\d{2}$/.test(cleaned)) {\n    return cleaned;\n  }\n\n  const date = new Date(cleaned);\n\n  if (!isNaN(date.getTime())) {\n    return date.toISOString().slice(0, 10);\n  }\n\n  return new Date().toISOString().slice(0, 10);\n}\n\nfunction toList(value) {\n  if (value === undefined || value === null || value === '') return [];\n\n  if (Array.isArray(value)) {\n    return value.map(cleanText).filter(Boolean);\n  }\n\n  if (typeof value === 'object') {\n    if (Array.isArray(value.itens)) {\n      return value.itens.map(cleanText).filter(Boolean);\n    }\n\n    return [JSON.stringify(value)];\n  }\n\n  const text = cleanText(value);\n\n  if (!text) return [];\n\n  try {\n    const parsed = JSON.parse(text);\n\n    if (Array.isArray(parsed)) {\n      return parsed.map(cleanText).filter(Boolean);\n    }\n\n    if (parsed && typeof parsed === 'object' && Array.isArray(parsed.itens)) {\n      return parsed.itens.map(cleanText).filter(Boolean);\n    }\n\n    return [cleanText(parsed)].filter(Boolean);\n  } catch (error) {\n    return text\n      .split(/;|\\n/)\n      .map(v => cleanText(v))\n      .filter(Boolean);\n  }\n}\n\nconst obra_codigo = cleanText(input.obra_codigo) || null;\nconst responsavel = cleanText(input.responsavel) || null;\n\nconst clima = cleanText(input.clima) || null;\nconst condicoes_canteiro = cleanText(input.condicoes_canteiro) || 'Não informado.';\n\nconst atividades = toList(input.atividades);\nconst maoDeObra = toList(input.mao_de_obra);\nconst equipamentos = toList(input.equipamentos);\nconst materiais = toList(input.materiais);\nconst ocorrencias = toList(input.ocorrencias);\nlet pendencias = toList(input.pendencias);\n\n// Texto geral usado para detectar data e pendências\nconst textoGeralOriginal = [\n  cleanText(input.mensagem),\n  cleanText(input.atividades),\n  cleanText(input.ocorrencias),\n  cleanText(input.pendencias),\n  atividades.join(' '),\n  ocorrencias.join(' '),\n  pendencias.join(' ')\n].join(' ');\n\nconst textoGeral = textoGeralOriginal.toLowerCase();\n\n// Prioriza data explícita na mensagem, por exemplo 08/06/2026\nconst dataExtraidaTexto = extractDateBR(textoGeralOriginal);\nconst data_rdo = dataExtraidaTexto || formatDate(input.data_rdo);\n\nconst temPendenciaPorTexto =\n  textoGeral.includes('não foram enviadas fotos') ||\n  textoGeral.includes('nao foram enviadas fotos') ||\n  textoGeral.includes('sem fotos') ||\n  textoGeral.includes('necessário') ||\n  textoGeral.includes('necessario') ||\n  textoGeral.includes('pendência') ||\n  textoGeral.includes('pendencia') ||\n  textoGeral.includes('confirmar') ||\n  textoGeral.includes('conferir');\n\n// Se detectou pendência no texto, mas a lista pendencias está vazia,\n// cria uma pendência real.\nif (pendencias.length === 0 && temPendenciaPorTexto) {\n  if (\n    textoGeral.includes('não foram enviadas fotos') ||\n    textoGeral.includes('nao foram enviadas fotos') ||\n    textoGeral.includes('sem fotos')\n  ) {\n    pendencias.push('Não foram enviadas fotos da execução.');\n  } else {\n    pendencias.push('Há informações pendentes ou incompletas no RDO.');\n  }\n}\n\nconst possui_pendencias = pendencias.length > 0;\n\nconst status_rdo = possui_pendencias\n  ? 'PENDENTE_REVISAO'\n  : 'MINUTA_GERADA';\n\nconst resumo_executivo =\n  `No dia ${data_rdo || 'não informado'}, foram registradas atividades na obra ${obra_codigo || 'não informada'}, sob responsabilidade de ${responsavel || 'responsável não informado'}. ` +\n  `As principais atividades relatadas foram: ${atividades.join('; ') || 'não informadas'}.`;\n\nconst observacoes_tecnicas =\n  ocorrencias.length > 0\n    ? `Foram registradas as seguintes ocorrências: ${ocorrencias.join('; ')}.`\n    : 'Não foram registradas ocorrências relevantes no período.';\n\nconst recomendacoes =\n  possui_pendencias\n    ? `Recomenda-se revisar as pendências apontadas antes da validação final do RDO: ${pendencias.join('; ')}.`\n    : 'RDO apto para revisão e validação pelo responsável técnico.';\n\nreturn [\n  {\n    json: {\n      obra_codigo,\n      data_rdo,\n      responsavel,\n\n      clima,\n      condicoes_canteiro,\n\n      atividades_executadas: atividades,\n      mao_de_obra: maoDeObra,\n      equipamentos,\n      materiais_recebidos: materiais,\n      ocorrencias,\n      pendencias,\n\n      idempotency_key: item.idempotency_key || null,\n      correlation_id: item.correlation_id || null\n\n      resumo_executivo,\n      observacoes_tecnicas,\n      recomendacoes,\n\n      status_rdo,\n      possui_pendencias,\n\n      origem: cleanText(input.origem) || 'WEBHOOK',\n\n      payload_original: {\n        entrada_original: inputOriginal,\n        entrada_normalizada: input\n      },\n\n      agente_nome: 'Agente Gerador de Diário de Obra',\n      agente_versao: '0.1.0',\n      modo_processamento: 'MOCK',\n      data_processamento: new Date().toISOString()\n    }\n  }\n];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        416,
+        0
+      ],
+      "id": "1f68b83f-5413-426f-83d2-e29b85224bcb",
+      "name": "Code Mock Gerador RDO"
+    },
+    {
+      "parameters": {
+        "jsCode": " const item = $input.first().json;\n\nfunction cleanText(value) {\n  if (value === undefined || value === null) return '';\n  return String(value).replace(/^=/, '').trim();\n}\n\nfunction parseBoolean(value) {\n  if (value === true) return true;\n  if (value === false) return false;\n\n  if (value === undefined || value === null || value === '') return false;\n\n  const text = String(value).trim().toLowerCase();\n\n  if (['true', 't', '1', 'sim', 'yes'].includes(text)) return true;\n  if (['false', 'f', '0', 'nao', 'não', 'no'].includes(text)) return false;\n\n  return false;\n}\n\nfunction asArray(value) {\n  if (value === undefined || value === null || value === '') return [];\n\n  if (Array.isArray(value)) {\n    return value.map(cleanText).filter(Boolean);\n  }\n\n  if (typeof value === 'object') {\n    if (Array.isArray(value.itens)) {\n      return value.itens.map(cleanText).filter(Boolean);\n    }\n\n    return Object.keys(value).length > 0 ? [JSON.stringify(value)] : [];\n  }\n\n  const text = cleanText(value);\n\n  if (!text) return [];\n\n  try {\n    const parsed = JSON.parse(text);\n\n    if (Array.isArray(parsed)) {\n      return parsed.map(cleanText).filter(Boolean);\n    }\n\n    if (parsed && typeof parsed === 'object' && Array.isArray(parsed.itens)) {\n      return parsed.itens.map(cleanText).filter(Boolean);\n    }\n\n    if (parsed && typeof parsed === 'object') {\n      return Object.keys(parsed).length > 0 ? [JSON.stringify(parsed)] : [];\n    }\n\n    return [cleanText(parsed)].filter(Boolean);\n  } catch (error) {\n    return text\n      .split(/;|\\n/)\n      .map(v => cleanText(v))\n      .filter(Boolean);\n  }\n}\n\nfunction jsonbObject(value) {\n  return {\n    itens: asArray(value)\n  };\n}\n\nfunction safeObject(value) {\n  if (!value) return {};\n\n  if (typeof value === 'object') return value;\n\n  try {\n    return JSON.parse(value);\n  } catch (error) {\n    return {\n      valor_original: String(value)\n    };\n  }\n}\n\nfunction formatDate(value) {\n  if (!value) {\n    return new Date().toISOString().slice(0, 10);\n  }\n\n  const cleaned = cleanText(value);\n\n  if (/^\\d{4}-\\d{2}-\\d{2}$/.test(cleaned)) {\n    return cleaned;\n  }\n\n  const date = new Date(cleaned);\n\n  if (!isNaN(date.getTime())) {\n    return date.toISOString().slice(0, 10);\n  }\n\n  return new Date().toISOString().slice(0, 10);\n}\n\nconst pendenciasArray = asArray(item.pendencias);\nconst ocorrenciasArray = asArray(item.ocorrencias);\n\nconst possuiPendenciasReal = parseBoolean(item.possui_pendencias);\n\nconst statusRdoReal = possuiPendenciasReal\n  ? 'PENDENTE_REVISAO'\n  : 'MINUTA_GERADA';\n\nreturn [\n  {\n    json: {\n      obra_codigo: cleanText(item.obra_codigo) || null,\n      data_rdo: formatDate(item.data_rdo),\n      responsavel: cleanText(item.responsavel) || null,\n\n      idempotency_key: item.idempotency_key || null,\n      correlation_id: item.correlation_id || null\n\n      clima: cleanText(item.clima) || null,\n      condicoes_canteiro: cleanText(item.condicoes_canteiro) || 'Não informado.',\n\n      atividades_executadas: jsonbObject(item.atividades_executadas),\n      mao_de_obra: jsonbObject(item.mao_de_obra),\n      equipamentos: jsonbObject(item.equipamentos),\n      materiais_recebidos: jsonbObject(item.materiais_recebidos),\n      ocorrencias: {\n        itens: ocorrenciasArray\n      },\n      pendencias: {\n        itens: pendenciasArray\n      },\n\n      resumo_executivo: cleanText(item.resumo_executivo) || null,\n      observacoes_tecnicas: cleanText(item.observacoes_tecnicas) || null,\n      recomendacoes: cleanText(item.recomendacoes) || null,\n\n      status_rdo: statusRdoReal,\n      possui_pendencias: possuiPendenciasReal,\n      acionar_agente_03: possuiPendenciasReal,\n\n      origem: cleanText(item.origem) || 'WEBHOOK',\n\n      payload_original: safeObject(item.payload_original),\n\n      agente_nome: cleanText(item.agente_nome) || 'Agente Gerador de Diário de Obra',\n      agente_versao: cleanText(item.agente_versao) || '0.1.0',\n      modo_processamento: cleanText(item.modo_processamento) || 'MOCK',\n\n      data_processamento: item.data_processamento || new Date().toISOString()\n    }\n  }\n];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        624,
+        0
+      ],
+      "id": "4e3c5521-f035-462f-af27-2294e5c71257",
+      "name": "Preparar RDO para PostgreSQL"
+    },
+    {
+      "parameters": {
+        "schema": {
+          "__rl": true,
+          "mode": "list",
+          "value": "public"
+        },
+        "table": {
+          "__rl": true,
+          "value": "rdo_obra",
+          "mode": "list",
+          "cachedResultName": "rdo_obra"
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "possui_pendencias": true,
+            "responsavel": "={{$json.responsavel}}",
+            "clima": "={{$json.clima}}",
+            "condicoes_canteiro": "={{ $json.condicoes_canteiro }}\n",
+            "atividades_executadas": "={{ $json.atividades_executadas }}",
+            "materiais_recebidos": "={{ $json.materiais_recebidos }}",
+            "ocorrencias": "={{ $json.ocorrencias }}",
+            "pendencias": "={{ $json.pendencias }}",
+            "resumo_executivo": "=={{$json.resumo_executivo}}",
+            "observacoes_tecnicas": "={{$json.observacoes_tecnicas}}",
+            "recomendacoes": "={{$json.recomendacoes}}",
+            "status_rdo": "={{$json.status_rdo}}",
+            "origem": "={{$json.origem}}",
+            "payload_original": "={{ $json.payload_original }}",
+            "agente_nome": "={{$json.agente_nome}}",
+            "agente_versao": "={{$json.agente_versao}}",
+            "data_processamento": "={{ $json.data_processamento }}",
+            "obra_codigo": "={{ $json.obra_codigo }}",
+            "data_rdo": "={{ $json.data_rdo }}",
+            "mao_de_obra": "={{ $json.mao_de_obra  }}",
+            "equipamentos": "={{ $json.equipamentos }}"
+          },
+          "matchingColumns": [
+            "id"
+          ],
+          "schema": [
+            {
+              "id": "id",
+              "displayName": "id",
+              "required": false,
+              "defaultMatch": true,
+              "display": true,
+              "type": "number",
+              "canBeUsedToMatch": true,
+              "removed": true
+            },
+            {
+              "id": "id_rdo",
+              "displayName": "id_rdo",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": true
+            },
+            {
+              "id": "obra_codigo",
+              "displayName": "obra_codigo",
+              "required": true,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "data_rdo",
+              "displayName": "data_rdo",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "dateTime",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "responsavel",
+              "displayName": "responsavel",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "clima",
+              "displayName": "clima",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "condicoes_canteiro",
+              "displayName": "condicoes_canteiro",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "atividades_executadas",
+              "displayName": "atividades_executadas",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "object",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "mao_de_obra",
+              "displayName": "mao_de_obra",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "object",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "equipamentos",
+              "displayName": "equipamentos",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "object",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "materiais_recebidos",
+              "displayName": "materiais_recebidos",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "object",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "ocorrencias",
+              "displayName": "ocorrencias",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "object",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "pendencias",
+              "displayName": "pendencias",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "object",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "resumo_executivo",
+              "displayName": "resumo_executivo",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "observacoes_tecnicas",
+              "displayName": "observacoes_tecnicas",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "recomendacoes",
+              "displayName": "recomendacoes",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "status_rdo",
+              "displayName": "status_rdo",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "possui_pendencias",
+              "displayName": "possui_pendencias",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "boolean",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "origem",
+              "displayName": "origem",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "payload_original",
+              "displayName": "payload_original",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "object",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "agente_nome",
+              "displayName": "agente_nome",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "agente_versao",
+              "displayName": "agente_versao",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "modo_processamento",
+              "displayName": "modo_processamento",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": true
+            },
+            {
+              "id": "data_processamento",
+              "displayName": "data_processamento",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "dateTime",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "criado_em",
+              "displayName": "criado_em",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "dateTime",
+              "canBeUsedToMatch": true,
+              "removed": true
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        832,
+        0
+      ],
+      "id": "9360d443-3aa2-456c-b55e-88f3996e7c35",
+      "name": "Insert rows in a table",
+      "credentials": {
+        "postgres": {
+          "id": "N4gqDQWfI7uqxr5f",
+          "name": "Postgres Docker - garcia_db"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={\n  \"status\": \"rdo_processado\",\n  \"obra_codigo\": \"{{ $json.obra_codigo }}\",\n  \"data_rdo\": \"{{ $json.data_rdo }}\",\n  \"status_rdo\": \"{{ $json.status_rdo }}\",\n  \"possui_pendencias\": \"{{ $json.possui_pendencias }}\",\n  \"agente_03_acionado\": false,\n  \"mensagem\": \"RDO gerado sem pendências.\"\n}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.5,
+      "position": [
+        1680,
+        304
+      ],
+      "id": "f5c3f46d-61d0-41ea-aba7-9f60b03cab5c",
+      "name": "Respond to Webhook"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 3
+          },
+          "conditions": [
+            {
+              "id": "70071d8f-8492-4847-bf74-2747e92d2919",
+              "leftValue": "={{ $json.acionar_agente_03 }}",
+              "rightValue": "=true",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "or"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        1232,
+        0
+      ],
+      "id": "82382888-665f-4690-ab23-0c8678f33995",
+      "name": "If"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://127.0.0.1:5678/webhook/registrar-pendencia",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ $json }}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.3,
+      "position": [
+        1664,
+        -208
+      ],
+      "id": "7fd9523e-7bf8-4b38-85a2-8b9f42f218b8",
+      "name": "HTTP Request"
+    },
+    {
+      "parameters": {
+        "jsCode": "const rdo = $input.first().json;\n\nfunction cleanText(value) {\n  if (value === undefined || value === null) return '';\n  return String(value).replace(/^=/, '').trim();\n}\n\nfunction parseBoolean(value) {\n  if (value === true) return true;\n  if (value === false) return false;\n\n  if (value === undefined || value === null || value === '') return false;\n\n  const text = String(value).trim().toLowerCase();\n\n  return ['true', 't', '1', 'sim', 'yes'].includes(text);\n}\n\nfunction asArray(value) {\n  if (value === undefined || value === null || value === '') {\n    return [];\n  }\n\n  if (Array.isArray(value)) {\n    return value.map(cleanText).filter(Boolean);\n  }\n\n  if (typeof value === 'object') {\n    if (Array.isArray(value.itens)) {\n      return value.itens.map(cleanText).filter(Boolean);\n    }\n\n    return Object.keys(value).length > 0\n      ? [JSON.stringify(value)]\n      : [];\n  }\n\n  const text = cleanText(value);\n\n  if (!text) {\n    return [];\n  }\n\n  try {\n    const parsed = JSON.parse(text);\n\n    if (Array.isArray(parsed)) {\n      return parsed.map(cleanText).filter(Boolean);\n    }\n\n    if (parsed && typeof parsed === 'object' && Array.isArray(parsed.itens)) {\n      return parsed.itens.map(cleanText).filter(Boolean);\n    }\n\n    if (parsed && typeof parsed === 'object') {\n      return Object.keys(parsed).length > 0\n        ? [JSON.stringify(parsed)]\n        : [];\n    }\n\n    return [cleanText(parsed)].filter(Boolean);\n  } catch (error) {\n    return text\n      .split(/;|\\n/)\n      .map(v => cleanText(v))\n      .filter(Boolean);\n  }\n}\n\nfunction formatDate(value) {\n  if (!value) {\n    return new Date().toISOString().slice(0, 10);\n  }\n\n  const cleaned = cleanText(value);\n\n  if (/^\\d{4}-\\d{2}-\\d{2}$/.test(cleaned)) {\n    return cleaned;\n  }\n\n  const date = new Date(cleaned);\n\n  if (!isNaN(date.getTime())) {\n    return date.toISOString().slice(0, 10);\n  }\n\n  return new Date().toISOString().slice(0, 10);\n}\n\n// Primeiro declaramos todas as listas\nconst pendenciasLista = asArray(rdo.pendencias);\nconst ocorrenciasLista = asArray(rdo.ocorrencias);\nconst atividadesLista = asArray(rdo.atividades_executadas);\nconst materiaisLista = asArray(rdo.materiais_recebidos);\nconst equipamentosLista = asArray(rdo.equipamentos);\nconst maoDeObraLista = asArray(rdo.mao_de_obra);\n\n// Depois usamos as listas\nconst possuiPendencias = parseBoolean(rdo.possui_pendencias);\n\nconst observacoes = cleanText(rdo.observacoes_tecnicas);\nconst recomendacoes = cleanText(rdo.recomendacoes);\n\nconst descricao = [\n  'RDO com pendências identificadas.',\n  observacoes ? `Observações técnicas: ${observacoes}` : null,\n  recomendacoes ? `Recomendações: ${recomendacoes}` : null,\n  pendenciasLista.length > 0 ? `Pendências registradas: ${pendenciasLista.join('; ')}` : null,\n  ocorrenciasLista.length > 0 ? `Ocorrências registradas: ${ocorrenciasLista.join('; ')}` : null,\n  atividadesLista.length > 0 ? `Atividades executadas: ${atividadesLista.join('; ')}` : null,\n  materiaisLista.length > 0 ? `Materiais informados: ${materiaisLista.join('; ')}` : null,\n  equipamentosLista.length > 0 ? `Equipamentos informados: ${equipamentosLista.join('; ')}` : null,\n  maoDeObraLista.length > 0 ? `Mão de obra informada: ${maoDeObraLista.join('; ')}` : null\n].filter(Boolean).join(' ');\n\nreturn [\n  {\n    json: {\n      obra_codigo: cleanText(rdo.obra_codigo),\n      origem: 'RDO',\n      origem_tipo: 'RELATORIO_DIARIO',\n      origem_id: rdo.id_rdo || rdo.id || null,\n\n      data_identificacao: formatDate(rdo.data_rdo),\n      responsavel_identificacao: cleanText(rdo.responsavel) || 'Responsável não informado',\n\n      descricao: descricao || 'RDO com pendências identificadas.',\n      responsavel_acao: cleanText(rdo.responsavel) || 'A definir',\n      prazo_limite: null,\n\n      evidencias: {\n        id_rdo: rdo.id_rdo || null,\n        id_registro_rdo: rdo.id || null,\n        data_rdo: formatDate(rdo.data_rdo),\n        status_rdo: cleanText(rdo.status_rdo),\n        possui_pendencias: possuiPendencias,\n        pendencias: pendenciasLista,\n        ocorrencias: ocorrenciasLista,\n        atividades_executadas: atividadesLista,\n        origem_agente: 'Agente 02 — Gerador de Diário de Obra'\n      },\n\n      payload_original: rdo\n    }\n  }\n];\n"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1424,
+        -208
+      ],
+      "id": "49bddc53-4fb7-46c8-bbd4-13405ea3d7de",
+      "name": "Montar Payload Agente 03"
+    },
+    {
+      "parameters": {
+        "jsCode": "const agente03 = $input.first().json;\n\n// Ajuste o nome se o seu nó PostgreSQL tiver outro nome\nconst rdo = $items(\"Insert rows in a table\")[0].json;\n\nfunction formatDate(value) {\n  if (!value) return null;\n  const date = new Date(value);\n  if (!isNaN(date.getTime())) {\n    return date.toISOString().slice(0, 10);\n  }\n  return String(value).slice(0, 10);\n}\n\nreturn [\n  {\n    json: {\n      status: \"rdo_processado\",\n      obra_codigo: rdo.obra_codigo,\n      data_rdo: formatDate(rdo.data_rdo),\n      status_rdo: rdo.status_rdo,\n      possui_pendencias: rdo.possui_pendencias,\n      idempotency_key: item.idempotency_key || null,\n      correlation_id: item.correlation_id || null\n      agente_03_acionado: true,\n      resposta_agente_03: agente03,\n      mensagem: \"RDO gerado e pendências encaminhadas ao Agente 03.\"\n    }\n  }\n];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1824,
+        -16
+      ],
+      "id": "875b46f3-5b3b-405c-a24a-131d884cffa4",
+      "name": "Code in JavaScript"
+    },
+    {
+      "parameters": {
+        "jsCode": "const rdo = $input.first().json;\n\nfunction parseBoolean(value) {\n  if (value === true) return true;\n  if (value === false) return false;\n\n  return ['true', 't', '1', 'sim', 'yes'].includes(\n    String(value ?? '').trim().toLowerCase()\n  );\n}\n\nfunction hasItems(value) {\n  if (!value) return false;\n\n  if (Array.isArray(value)) {\n    return value.length > 0;\n  }\n\n  if (typeof value === 'object') {\n    if (Array.isArray(value.itens)) {\n      return value.itens.length > 0;\n    }\n\n    return Object.keys(value).length > 0;\n  }\n\n  try {\n    const parsed = JSON.parse(value);\n\n    if (Array.isArray(parsed)) {\n      return parsed.length > 0;\n    }\n\n    if (parsed && Array.isArray(parsed.itens)) {\n      return parsed.itens.length > 0;\n    }\n  } catch (error) {\n    return String(value).trim().length > 0;\n  }\n\n  return false;\n}\n\nconst possuiPendencias =\n  parseBoolean(rdo.possui_pendencias) ||\n  rdo.status_rdo === 'PENDENTE_REVISAO' ||\n  hasItems(rdo.pendencias) ||\n  hasItems(rdo.ocorrencias);\n\nreturn [\n  {\n    json: {\n      ...rdo,\n\n      possui_pendencias: possuiPendencias,\n      acionar_agente_03: possuiPendencias,\n\n      status_rdo: possuiPendencias\n        ? 'PENDENTE_REVISAO'\n        : 'MINUTA_GERADA'\n    }\n  }\n];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1040,
+        0
+      ],
+      "id": "5343c548-56a4-4f80-b796-50a8f3f3ffbf",
+      "name": "Normalizar Decisão Agente 03"
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Webhook": {
+      "main": [
+        [
+          {
+            "node": "Set Dados Básicos RDO",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Set Dados Básicos RDO": {
+      "main": [
+        [
+          {
+            "node": "Code Mock Gerador RDO",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Code Mock Gerador RDO": {
+      "main": [
+        [
+          {
+            "node": "Preparar RDO para PostgreSQL",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Preparar RDO para PostgreSQL": {
+      "main": [
+        [
+          {
+            "node": "Insert rows in a table",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Insert rows in a table": {
+      "main": [
+        [
+          {
+            "node": "Normalizar Decisão Agente 03",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "If": {
+      "main": [
+        [
+          {
+            "node": "Montar Payload Agente 03",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Respond to Webhook",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "HTTP Request": {
+      "main": [
+        [
+          {
+            "node": "Code in JavaScript",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Montar Payload Agente 03": {
+      "main": [
+        [
+          {
+            "node": "HTTP Request",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Code in JavaScript": {
+      "main": [
+        [
+          {
+            "node": "Respond to Webhook",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Normalizar Decisão Agente 03": {
+      "main": [
+        [
+          {
+            "node": "If",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": true,
+  "settings": {
+    "executionOrder": "v1",
+    "availableInMCP": false
+  },
+  "versionId": "766dece8-1807-43eb-baf8-bf741dcf0270",
+  "meta": {
+    "templateCredsSetupCompleted": true,
+    "instanceId": "8413b6be73d2e2e10307909a55f83a3ab488d840252474a03ecb97980f038cc0"
+  },
+  "id": "6LLjGcJfRgbQVW9m3LIho",
+  "tags": []
+}
