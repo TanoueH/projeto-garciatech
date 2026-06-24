@@ -1,13 +1,18 @@
 import hashlib
+import re
 import json
 import os
 import uuid
 from datetime import datetime, timezone
+from io import BytesIO
+from pathlib import Path
+from urllib.parse import urlparse
 from typing import Any, Dict, Optional
 
 import psycopg
+from minio import Minio
 from psycopg.types.json import Json
-from fastapi import FastAPI, Header, HTTPException, Request
+from fastapi import FastAPI, Header, HTTPException, Request, UploadFile, File, Form
 from pydantic import BaseModel, Field
 
 
@@ -339,4 +344,243 @@ def resumo_dia(obra_codigo: str):
         "mensagens_recebidas": row[0] or 0,
         "mensagens_duplicadas": row[1] or 0,
         "total_mensagens": row[2] or 0,
+    }
+
+
+# -----------------------------------------------------------------------------
+# Document upload / MinIO
+# -----------------------------------------------------------------------------
+
+MINIO_ENDPOINT = os.getenv("MINIO_ENDPOINT", "http://minio:9000")
+MINIO_ACCESS_KEY = os.getenv("MINIO_ACCESS_KEY")
+MINIO_SECRET_KEY = os.getenv("MINIO_SECRET_KEY")
+MINIO_DEFAULT_BUCKET = os.getenv("MINIO_DEFAULT_BUCKET", "obra-caio")
+
+
+def get_minio_client() -> Minio:
+    if not MINIO_ACCESS_KEY or not MINIO_SECRET_KEY:
+        raise RuntimeError("Credenciais MinIO não definidas.")
+
+    parsed = urlparse(MINIO_ENDPOINT)
+
+    if parsed.scheme:
+        endpoint = parsed.netloc
+        secure = parsed.scheme == "https"
+    else:
+        endpoint = MINIO_ENDPOINT.replace("http://", "").replace("https://", "")
+        secure = False
+
+    return Minio(
+        endpoint,
+        access_key=MINIO_ACCESS_KEY,
+        secret_key=MINIO_SECRET_KEY,
+        secure=secure,
+    )
+
+
+def sanitize_filename(filename: str | None) -> str:
+    name = Path(filename or "anexo.bin").name
+    name = re.sub(r"[^A-Za-z0-9._-]+", "_", name)
+    return name or "anexo.bin"
+
+
+def ensure_documentos_table() -> None:
+    sql = """
+    CREATE TABLE IF NOT EXISTS arquivos_obra (
+        id SERIAL PRIMARY KEY,
+        tenant_id TEXT NOT NULL,
+        obra_codigo TEXT NOT NULL,
+        mensagem_id INTEGER,
+        canal_origem TEXT,
+        remetente_identificador TEXT,
+        origem_id TEXT,
+        tipo_documento TEXT,
+        file_name TEXT,
+        mimetype TEXT,
+        storage_provider TEXT DEFAULT 'minio',
+        bucket TEXT NOT NULL,
+        object_key TEXT NOT NULL,
+        tamanho_bytes INTEGER,
+        hash_arquivo TEXT,
+        status_processamento TEXT DEFAULT 'ARMAZENADO',
+        payload_metadata JSONB,
+        criado_em TIMESTAMP DEFAULT NOW()
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_arquivos_obra_codigo
+        ON arquivos_obra (obra_codigo);
+
+    CREATE INDEX IF NOT EXISTS idx_arquivos_mensagem_id
+        ON arquivos_obra (mensagem_id);
+
+    CREATE INDEX IF NOT EXISTS idx_arquivos_hash
+        ON arquivos_obra (hash_arquivo);
+    """
+
+    with get_db_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(sql)
+        conn.commit()
+
+
+@app.post("/documentos/upload")
+async def upload_documento(
+    file: UploadFile = File(...),
+    tenant_id: str = Form(default="construtora-piloto"),
+    obra_codigo: str = Form(default="OBRA-CAIO"),
+    canal_origem: str = Form(default="desconhecido"),
+    mensagem_id: Optional[int] = Form(default=None),
+    remetente_identificador: Optional[str] = Form(default=None),
+    origem_id: Optional[str] = Form(default=None),
+    tipo_documento: Optional[str] = Form(default=None),
+):
+    ensure_documentos_table()
+
+    content = await file.read()
+
+    if not content:
+        raise HTTPException(
+            status_code=400,
+            detail={"message": "Arquivo vazio ou não recebido."},
+        )
+
+    file_hash = hashlib.sha256(content).hexdigest()
+    file_size = len(content)
+    safe_name = sanitize_filename(file.filename)
+    mimetype = file.content_type or "application/octet-stream"
+
+    bucket = MINIO_DEFAULT_BUCKET
+    date_path = datetime.now(timezone.utc).strftime("%Y/%m/%d")
+    object_key = (
+        f"{tenant_id}/{obra_codigo}/{canal_origem}/"
+        f"{date_path}/{file_hash[:12]}_{safe_name}"
+    )
+
+    try:
+        client = get_minio_client()
+
+        if not client.bucket_exists(bucket):
+            client.make_bucket(bucket)
+
+        client.put_object(
+            bucket_name=bucket,
+            object_name=object_key,
+            data=BytesIO(content),
+            length=file_size,
+            content_type=mimetype,
+        )
+
+    except Exception as exc:
+        raise HTTPException(
+            status_code=500,
+            detail={
+                "message": "Erro ao salvar arquivo no MinIO.",
+                "error": str(exc),
+                "bucket": bucket,
+                "object_key": object_key,
+            },
+        )
+
+    insert_sql = """
+    INSERT INTO arquivos_obra (
+        tenant_id,
+        obra_codigo,
+        mensagem_id,
+        canal_origem,
+        remetente_identificador,
+        origem_id,
+        tipo_documento,
+        file_name,
+        mimetype,
+        storage_provider,
+        bucket,
+        object_key,
+        tamanho_bytes,
+        hash_arquivo,
+        status_processamento,
+        payload_metadata
+    )
+    VALUES (
+        %(tenant_id)s,
+        %(obra_codigo)s,
+        %(mensagem_id)s,
+        %(canal_origem)s,
+        %(remetente_identificador)s,
+        %(origem_id)s,
+        %(tipo_documento)s,
+        %(file_name)s,
+        %(mimetype)s,
+        'minio',
+        %(bucket)s,
+        %(object_key)s,
+        %(tamanho_bytes)s,
+        %(hash_arquivo)s,
+        'ARMAZENADO',
+        %(payload_metadata)s
+    )
+    RETURNING id;
+    """
+
+    metadata = {
+        "original_filename": file.filename,
+        "content_type": mimetype,
+        "hash_sha256": file_hash,
+    }
+
+    try:
+        with get_db_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    insert_sql,
+                    {
+                        "tenant_id": tenant_id,
+                        "obra_codigo": obra_codigo,
+                        "mensagem_id": mensagem_id,
+                        "canal_origem": canal_origem,
+                        "remetente_identificador": remetente_identificador,
+                        "origem_id": origem_id,
+                        "tipo_documento": tipo_documento,
+                        "file_name": safe_name,
+                        "mimetype": mimetype,
+                        "bucket": bucket,
+                        "object_key": object_key,
+                        "tamanho_bytes": file_size,
+                        "hash_arquivo": file_hash,
+                        "payload_metadata": Json(metadata),
+                    },
+                )
+                row = cur.fetchone()
+            conn.commit()
+
+    except Exception as exc:
+        raise HTTPException(
+            status_code=500,
+            detail={
+                "message": "Arquivo salvo no MinIO, mas houve erro ao registrar no banco.",
+                "error": str(exc),
+                "bucket": bucket,
+                "object_key": object_key,
+            },
+        )
+
+    documento_id = row[0]
+
+    return {
+        "ok": True,
+        "documento_id": documento_id,
+        "tenant_id": tenant_id,
+        "obra_codigo": obra_codigo,
+        "mensagem_id": mensagem_id,
+        "anexo": {
+            "documento_id": documento_id,
+            "tipo": tipo_documento or "documento",
+            "file_name": safe_name,
+            "mimetype": mimetype,
+            "storage_provider": "minio",
+            "bucket": bucket,
+            "object_key": object_key,
+            "tamanho_bytes": file_size,
+            "hash_arquivo": file_hash,
+            "status_processamento": "ARMAZENADO",
+        },
     }
