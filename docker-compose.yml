@@ -1,7 +1,4 @@
 services:
-  # =========================
-  # REVERSE PROXY (ÚNICO EXPOSTO)
-  # =========================
   traefik:
     image: traefik:v3.1
     restart: unless-stopped
@@ -11,11 +8,6 @@ services:
       - --providers.docker.exposedbydefault=false
       - --entrypoints.web.address=:80
       - --entrypoints.websecure.address=:443
-      # produção: ACME/Let's Encrypt (habilitar depois)
-      # - --certificatesresolvers.le.acme.email=${LE_EMAIL}
-      # - --certificatesresolvers.le.acme.storage=/letsencrypt/acme.json
-      # - --certificatesresolvers.le.acme.httpchallenge=true
-      # - --certificatesresolvers.le.acme.httpchallenge.entrypoint=web
     ports:
       - "80:80"
       - "443:443"
@@ -25,13 +17,12 @@ services:
     networks:
       - public
       - private
-   
-  # =========================
-  # DATABASES
-  # =========================
+
   postgres:
     image: postgres:15
     restart: unless-stopped
+    ports:
+      - "127.0.0.1:15432:5432"
     environment:
       POSTGRES_USER: ${POSTGRES_USER}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
@@ -47,125 +38,12 @@ services:
       timeout: 5s
       retries: 10
 
-  mariadb:
-    image: mariadb:10.6
-    restart: unless-stopped
-    environment:
-      MARIADB_ROOT_PASSWORD: ${MARIADB_ROOT_PASSWORD}
-      MARIADB_DATABASE: ${ERP_DB_NAME}
-      MARIADB_USER: ${ERP_DB_USER}
-      MARIADB_PASSWORD: ${ERP_DB_PASS}
-    volumes:
-      - mariadb_data:/var/lib/mysql
-    networks:
-      - private
-    healthcheck:
-      test: ["CMD", "mysqladmin", "ping", "-h", "localhost"]
-      interval: 10s
-      timeout: 5s
-      retries: 15
-
-  # =========================
-  # DOCUMENTOS
-  # =========================
-  minio:
-    image: quay.io/minio/minio:latest
-    command: server /data --console-address ":9001"
-    restart: unless-stopped
-    environment:
-      MINIO_ROOT_USER: ${MINIO_ROOT_USER}
-      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
-    ports:
-      - "9000:9000"
-      - "9001:9001"
-    volumes:
-      - minio_data:/data
-    networks:
-      - private
-    labels:
-      - traefik.enable=true
-      - traefik.docker.network=projeto-garcia_private
-
-      - traefik.http.routers.minio.rule=Host(`minio.localhost`)
-      - traefik.http.routers.minio.entrypoints=web
-      - traefik.http.routers.minio.service=minio-s3
-      - traefik.http.services.minio-s3.loadbalancer.server.port=9000
-
-      - traefik.http.routers.minio-console.rule=Host(`minio-console.localhost`)
-      - traefik.http.routers.minio-console.entrypoints=web
-      - traefik.http.routers.minio-console.service=minio-console
-      - traefik.http.services.minio-console.loadbalancer.server.port=9001
-  # =========================
-  # SSO / IAM
-  # =========================
-  keycloak:
-    image: quay.io/keycloak/keycloak:26.0
-    restart: unless-stopped
-    command: start-dev
-    environment:
-      KC_DB: postgres
-      KC_DB_URL: jdbc:postgresql://postgres:5432/${KC_DB_NAME}
-      KC_DB_USERNAME: ${KC_DB_USER}
-      KC_DB_PASSWORD: ${KC_DB_PASS}
-      KEYCLOAK_ADMIN: ${KC_ADMIN_USER}
-      KEYCLOAK_ADMIN_PASSWORD: ${KC_ADMIN_PASS}
-    depends_on:
-      postgres:
-        condition: service_healthy
-    networks:
-      - private
-    labels:
-      - traefik.enable=true
-      - traefik.http.routers.keycloak.rule=Host(`sso.localhost`)
-      - traefik.http.routers.keycloak.entrypoints=web
-      - traefik.http.services.keycloak.loadbalancer.server.port=8080
-
-  # =========================
-  # PROJETO / OBRA
-  # =========================
-  openproject:
-    image: openproject/community:13.0
-    restart: unless-stopped
-    ports:
-      - "8081:80"
-    environment:
-      DATABASE_URL: postgres://${OPENPROJECT_DB_USER}:${OPENPROJECT_DB_PASSWORD}@postgres:5432/${OPENPROJECT_DB_NAME}
-      OPENPROJECT_HOST__NAME: "localhost:8081"
-      OPENPROJECT_HTTPS: "false"
-    depends_on:
-      postgres:
-        condition: service_healthy
-    volumes:
-      - openproject_data:/var/openproject
-    networks:
-      - private
-    labels:
-      - traefik.enable=false
-      
-  # =========================
-  # ERP (exemplo de contêiner – ajuste conforme seu stack ERPNext real)
-  # =========================
-  erpnext:
-    profiles: ["erp"]
-    image: frappe/erpnext:latest
-    restart: unless-stopped
-    depends_on:
-      mariadb:
-        condition: service_healthy
-    networks:
-      - private
-    labels:
-      - traefik.enable=true
-      - traefik.http.routers.erp.rule=Host(`erp.localhost`)
-      - traefik.http.routers.erp.entrypoints=web
-      - traefik.http.services.erp.loadbalancer.server.port=8000
-
-  # =========================
-  # AUTOMAÇÃO (N8N) + FILAS
-  # =========================
   redis:
     image: redis:7-alpine
     restart: unless-stopped
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - redis_data:/data
     networks:
       - private
     healthcheck:
@@ -175,19 +53,19 @@ services:
       retries: 10
 
   n8n:
-    image: n8nio/n8n:latest
+    image: n8nio/n8n:2.4.6
     restart: unless-stopped
     ports:
-      - "5678:5678"
+      - "127.0.0.1:5678:5678"
     environment:
-      N8N_HOST: samsung.tailf17266.ts.net
+      N8N_HOST: ${N8N_HOST}
       N8N_PORT: "5678"
       N8N_PROTOCOL: http
-      N8N_EDITOR_BASE_URL: http://samsung.tailf17266.ts.net:5678/
-      WEBHOOK_URL: http://samsung.tailf17266.ts.net:5678/
+      N8N_EDITOR_BASE_URL: ${N8N_EDITOR_BASE_URL}
+      WEBHOOK_URL: ${WEBHOOK_URL}
       N8N_PROXY_HOPS: "1"
       N8N_SECURE_COOKIE: "false"
-      
+
       DB_TYPE: postgresdb
       DB_POSTGRESDB_HOST: postgres
       DB_POSTGRESDB_DATABASE: ${N8N_DB_NAME}
@@ -198,6 +76,7 @@ services:
       N8N_BASIC_AUTH_ACTIVE: "true"
       N8N_BASIC_AUTH_USER: ${N8N_BASIC_AUTH_USER}
       N8N_BASIC_AUTH_PASSWORD: ${N8N_BASIC_AUTH_PASSWORD}
+
       N8N_DIAGNOSTICS_ENABLED: "false"
       N8N_DIAGNOSTICS_CONFIG_FRONTEND: "false"
       N8N_DIAGNOSTICS_CONFIG_BACKEND: "false"
@@ -205,171 +84,152 @@ services:
       NODE_FUNCTION_ALLOW_BUILTIN: crypto
       NODES_EXCLUDE: "[]"
       N8N_RESTRICT_FILE_ACCESS_TO: "/data;/outputs"
-
     volumes:
+      - n8n_data:/home/node/.n8n
       - ./data:/data
       - ./outputs:/outputs
-
     depends_on:
       postgres:
         condition: service_healthy
-
+      redis:
+        condition: service_healthy
     networks:
       - private
-
     labels:
       - traefik.enable=true
-      - traefik.docker.network=projeto-garcia_private
+      - traefik.docker.network=obra_caio_private
       - traefik.http.routers.n8n.rule=Host(`n8n.localhost`)
       - traefik.http.routers.n8n.entrypoints=web
       - traefik.http.services.n8n.loadbalancer.server.port=5678
-  # =========================
-  # API / WORKERS (FASTAPI)
-  # =========================
-  fire_api:
+
+  api_core:
     build:
       context: .
-      dockerfile: Dockerfile
-    image: fire_api:latest
+      dockerfile: Dockerfile.api
+    image: construction_api:latest
+    ports:
+      - "127.0.0.1:8000:8000"
     restart: unless-stopped
+    command: ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
+    environment:
+      DATABASE_URL: postgresql://${APP_DB_USER}:${APP_DB_PASS}@postgres:5432/${APP_DB_NAME}
+      REDIS_URL: redis://redis:6379/1
+      MINIO_ENDPOINT: http://minio:9000
+      MINIO_ACCESS_KEY: ${MINIO_ROOT_USER}
+      MINIO_SECRET_KEY: ${MINIO_ROOT_PASSWORD}
+      SILICONFLOW_API_KEY: ${SILICONFLOW_API_KEY}
+      SILICONFLOW_BASE_URL: ${SILICONFLOW_BASE_URL}
+      SILICONFLOW_MODEL: ${SILICONFLOW_MODEL}
+      TZ: America/Sao_Paulo
     depends_on:
       postgres:
+        condition: service_healthy
+      redis:
         condition: service_healthy
     networks:
       - private
     labels:
-      traefik.enable: "true"
-      traefik.http.routers.api.rule: "Host(`api.localhost`)"
-      traefik.http.routers.api.entrypoints: "web"
-      traefik.http.services.api.loadbalancer.server.port: "8000"
-    command: ["uvicorn", "fire_api.main:app", "--host", "0.0.0.0", "--port", "8000"]
+      - traefik.enable=true
+      - traefik.docker.network=obra_caio_private
+      - traefik.http.routers.api.rule=Host(`api.localhost`)
+      - traefik.http.routers.api.entrypoints=web
+      - traefik.http.services.api.loadbalancer.server.port=8000
     healthcheck:
-      test: ["CMD-SHELL", "curl -fsS http://localhost:8000/status/health || exit 1"]
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:8000/status/health')\" || exit 1"]
+      interval: 20s
+      timeout: 5s
+      retries: 5
 
-  # =========================
-  # OBSERVABILIDADE
-  # =========================
-  prometheus:
-    image: prom/prometheus
-    restart: unless-stopped
-    volumes:
-      - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
-      - prometheus_data:/prometheus
-    networks:
-      - private
-    labels:
-      traefik.enable: "true"
-      traefik.http.routers.prometheus.rule: "Host(`prometheus.localhost`)"
-      traefik.http.routers.prometheus.entrypoints: "web"
-      traefik.http.services.prometheus.loadbalancer.server.port: "9090"
-
-  grafana:
-    image: grafana/grafana
-    restart: unless-stopped
-    environment:
-      - GF_SECURITY_ADMIN_USER=${GRAFANA_ADMIN_USER}
-      - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_ADMIN_PASS}
-    volumes:
-      - grafana_data:/var/lib/grafana
-    networks:
-      - private
-    labels:
-      - traefik.enable=true
-      - traefik.http.routers.grafana.rule=Host(`grafana.localhost`)
-      - traefik.http.routers.grafana.entrypoints=web
-      - traefik.http.services.grafana.loadbalancer.server.port=3000
-
-  loki:
-    image: grafana/loki:3.0.0
-    restart: unless-stopped
-    networks:
-      - private
-
-  promtail:
-    image: grafana/promtail:3.0.0
-    restart: unless-stopped
-    volumes:
-      - /var/lib/docker/containers:/var/lib/docker/containers:ro
-      - /var/run/docker.sock:/var/run/docker.sock:ro
-      - ./promtail.yml:/etc/promtail/config.yml:ro
-    command: -config.file=/etc/promtail/config.yml
-    networks:
-      - private
-
-  # =========================
-  # BI (escolha 1 no MVP)
-  # =========================
-  superset:
-    profiles: ["bi"]
+  agent_worker:
     build:
       context: .
-      dockerfile: Dockerfile.superset
+      dockerfile: Dockerfile.api
+    image: construction_agents:latest
     restart: unless-stopped
+    command: ["python", "-m", "app.workers.agent_worker"]
     environment:
-      SUPERSET_DATABASE_URI: postgresql+psycopg2://${SUPERSET_DB_USER}:${SUPERSET_DB_PASS}@postgres:5432/${SUPERSET_DB_NAME}
-      SECRET_KEY: ${SUPERSET_SECRET_KEY}
-      SCARF_ANALYTICS: "false"
+      DATABASE_URL: postgresql://${APP_DB_USER}:${APP_DB_PASS}@postgres:5432/${APP_DB_NAME}
+      REDIS_URL: redis://redis:6379/1
+      SILICONFLOW_API_KEY: ${SILICONFLOW_API_KEY}
+      SILICONFLOW_BASE_URL: ${SILICONFLOW_BASE_URL}
+      SILICONFLOW_MODEL: ${SILICONFLOW_MODEL}
+      TZ: America/Sao_Paulo
     depends_on:
       postgres:
         condition: service_healthy
-    volumes:
-      - superset_home:/app/superset_home
-      - ./superset_config.py:/app/pythonpath/superset_config.py
+      redis:
+        condition: service_healthy
     networks:
       - private
-    labels:
-      - traefik.enable=true
-      - traefik.http.routers.superset.rule=Host(`superset.localhost`)
-      - traefik.http.routers.superset.entrypoints=web
-      - traefik.http.services.superset.loadbalancer.server.port=8088
 
-  # =========================
-  # ADMIN (APENAS DEV / PERFIL)
-  # =========================
-  pgadmin:
-    image: dpage/pgadmin4
-    profiles: ["dev"]
+  rpa_worker:
+    build:
+      context: .
+      dockerfile: Dockerfile.rpa
+    image: construction_rpa:latest
+    restart: unless-stopped
+    command: ["python", "-m", "rpa_worker.main"]
     environment:
-      PGADMIN_DEFAULT_EMAIL: ${PGADMIN_DEFAULT_EMAIL}
-      PGADMIN_DEFAULT_PASSWORD: ${PGADMIN_DEFAULT_PASSWORD}
+      DATABASE_URL: postgresql://${APP_DB_USER}:${APP_DB_PASS}@postgres:5432/${APP_DB_NAME}
+      RPA_HEADLESS: "true"
+      TZ: America/Sao_Paulo
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - private
+    profiles: ["rpa"]
+
+  minio:
+    image: quay.io/minio/minio:RELEASE.2025-04-22T22-12-26Z
+    command: server /data --console-address ":9001"
+    restart: unless-stopped
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
+    ports:
+      - "127.0.0.1:9000:9000"
+      - "127.0.0.1:9001:9001"
     volumes:
-      - pgadmin_data:/var/lib/pgadmin
+      - minio_data:/data
     networks:
       - private
     labels:
       - traefik.enable=true
-      - traefik.http.routers.pgadmin.rule=Host(`pgadmin.localhost`)
-      - traefik.http.routers.pgadmin.entrypoints=web
-      - traefik.http.services.pgadmin.loadbalancer.server.port=80
+      - traefik.docker.network=obra_caio_private
+      - traefik.http.routers.minio.rule=Host(`minio.localhost`)
+      - traefik.http.routers.minio.entrypoints=web
+      - traefik.http.routers.minio.service=minio-s3
+      - traefik.http.services.minio-s3.loadbalancer.server.port=9000
+      - traefik.http.routers.minio-console.rule=Host(`minio-console.localhost`)
+      - traefik.http.routers.minio-console.entrypoints=web
+      - traefik.http.routers.minio-console.service=minio-console
+      - traefik.http.services.minio-console.loadbalancer.server.port=9001
 
   evolution-api:
-    image: atendai/evolution-api:latest
-    container_name: evolution-api
+    image: evoapicloud/evolution-api:v2.3.6
     restart: unless-stopped
     ports:
-      - "8080:8080"
+      - "127.0.0.1:8080:8080"
     environment:
       - TZ=America/Sao_Paulo
       - SERVER_URL=${EVOLUTION_SERVER_URL}
       - ENV=PROD
       - API_VERSION=v2
-
       - CORS_ORIGIN=*
       - CORS_METHODS=GET,POST,PUT,DELETE
       - CORS_CREDENTIALS=true
-
       - AUTHENTICATION_TYPE=${EVOLUTION_AUTHENTICATION_TYPE}
       - AUTHENTICATION_API_KEY=${EVOLUTION_API_KEY}
-
       - DATABASE_ENABLED=true
       - DATABASE_PROVIDER=postgresql
       - DATABASE_CONNECTION_URI=postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}?schema=evolution
-
       - CACHE_REDIS_ENABLED=true
-      - CACHE_REDIS_URI=redis://redis:6379/6
+      - CACHE_REDIS_URI=redis://redis:6379/0
       - CACHE_REDIS_PREFIX_KEY=evolution
       - CACHE_REDIS_SAVE_INSTANCES=true
-      - CACHE_LOCAL_ENABLED=false
+      - CACHE_LOCAL_ENABLED=true
+      - CONFIG_SESSION_PHONE_VERSION=2.3000.1033773198
     volumes:
       - evolution_data:/evolution/instances
     networks:
@@ -380,23 +240,54 @@ services:
       redis:
         condition: service_healthy
 
+  grafana:
+    image: grafana/grafana:11.6.0
+    restart: unless-stopped
+    environment:
+      - GF_SECURITY_ADMIN_USER=${GRAFANA_ADMIN_USER}
+      - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_ADMIN_PASS}
+    volumes:
+      - grafana_data:/var/lib/grafana
+    networks:
+      - private
+    labels:
+      - traefik.enable=true
+      - traefik.docker.network=obra_caio_private
+      - traefik.http.routers.grafana.rule=Host(`grafana.localhost`)
+      - traefik.http.routers.grafana.entrypoints=web
+      - traefik.http.services.grafana.loadbalancer.server.port=3000
+
+  dashboard:
+    image: nginx:1.27-alpine
+    container_name: construction_dashboard
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:8109:80"
+    volumes:
+      - ./dashboard:/usr/share/nginx/html:ro
+    networks:
+      - private
+    labels:
+      traefik.enable: "true"
+      traefik.docker.network: obra_caio_private
+      traefik.http.routers.construction-dashboard.entrypoints: web
+      traefik.http.routers.construction-dashboard.rule: Host(`control.localhost`)
+      traefik.http.services.construction-dashboard.loadbalancer.server.port: "80"
+
 volumes:
   traefik_letsencrypt:
   postgres_data:
-  postgres_init:
-  mariadb_data:
-  minio_data:
-  openproject_data:
-  prometheus_data:
-  grafana_data:
-  pgadmin_data:
-  superset_home:
-  evolution_data:
   redis_data:
- 
+  n8n_data:
+  minio_data:
+  grafana_data:
+  evolution_data:
+
 networks:
   public:
+    name: obra_caio_public
     driver: bridge
+
   private:
+    name: obra_caio_private
     driver: bridge
-    

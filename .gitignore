@@ -55,3 +55,23 @@ outputs/reports/*
 docs/password*.txt
 docs/*senha*.txt
 docs/comandos.txt
+# Local Docker Compose variants and backups
+docker-compose.override.yml
+docker-compose.*.yml
+docker-compose.yml.*
+!docker-compose.yml
+!docker-compose.override.example.yml
+
+# Local backups and debug outputs
+backups/
+outputs/debug/
+
+# Local secrets
+.env
+.env.*
+*.env
+
+# Local temporary code backups
+*.bak
+*.bak_*
+*.backup

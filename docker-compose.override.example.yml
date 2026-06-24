@@ -1,0 +1,4 @@
+services:
+  grafana:
+    ports:
+      - "127.0.0.1:13001:3000"

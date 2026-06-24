@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Garcia Tech Dev Dashboard</title>
+  <title>Construction Science Agents Dev Dashboard</title>
 
   <style>
     :root {
@@ -17,6 +17,8 @@
       --muted: #8fa3b8;
       --ok: #33d17a;
       --warn: #f6c177;
+      --off: #7f8792;
+      --danger: #ff6b6b;
     }
 
     * {
@@ -48,6 +50,7 @@
       color: var(--muted);
       font-size: 14px;
       margin: 0;
+      line-height: 1.5;
     }
 
     .section-title {
@@ -86,8 +89,8 @@
     }
 
     .card.disabled {
-      opacity: .45;
-     cursor: not-allowed;
+      opacity: .48;
+      cursor: not-allowed;
     }
 
     .card.disabled:hover {
@@ -119,6 +122,7 @@
       font-size: 12px;
       color: var(--muted);
       word-break: break-all;
+      line-height: 1.35;
     }
 
     .badge {
@@ -133,17 +137,33 @@
       border: 1px solid rgba(45, 140, 255, .28);
     }
 
+    .badge-ok {
+      background: rgba(51, 209, 122, .12);
+      color: var(--ok);
+      border-color: rgba(51, 209, 122, .28);
+    }
+
     .badge-dev {
       background: rgba(246, 193, 119, .12);
       color: var(--warn);
       border-color: rgba(246, 193, 119, .28);
     }
 
+    .badge-off {
+      background: rgba(127, 135, 146, .12);
+      color: var(--off);
+      border-color: rgba(127, 135, 146, .28);
+    }
+
     .muted {
-      opacity: .68;
+      opacity: .72;
       margin-top: 28px;
       font-size: 12px;
       line-height: 1.5;
+    }
+
+    code {
+      color: #b8d7ff;
     }
   </style>
 </head>
@@ -151,39 +171,51 @@
 <body>
 
 <header>
-  <h1>Garcia Tech Dev Dashboard</h1>
-  <p class="subtitle">Painel local da stack Garcia Tech / Projeto Garcia</p>
+  <h1>Construction Science Agents Dev Dashboard</h1>
+  <p class="subtitle">
+    Painel local do MVP <strong>Obra-Caio Control Tower</strong>.<br>
+    Stack atual: n8n + api_core + agent_worker + PostgreSQL + Redis + Evolution API + MinIO + Grafana + Traefik.
+  </p>
 </header>
 
 <section>
-  <div class="section-title">Projeto e automação</div>
+  <div class="section-title">Núcleo MVP e automação</div>
 
   <div class="grid">
 
-    <a class="card" href="http://samsung.tailf17266.ts.net:8081/" target="_blank">
-      <div class="icon" style="background-image:url('./icons/openproject.png');"></div>
+    <a class="card" href="http://127.0.0.1:8000/docs" target="_blank">
+      <div class="icon" style="background-image:url('./icons/api_docs.png');"></div>
       <div class="content">
-        <h3>OpenProject</h3>
-        <p>http://samsung.tailf17266.ts.net:8081/</p>
-        <span class="badge">Gestão da obra</span>
+        <h3>API Core Docs</h3>
+        <p>http://127.0.0.1:8000/docs</p>
+        <span class="badge badge-ok">FastAPI</span>
       </div>
     </a>
 
-    <a class="card" href="http://samsung.tailf17266.ts.net:5678/" target="_blank">
+    <a class="card" href="http://127.0.0.1:8000/status/health" target="_blank">
+      <div class="icon" style="background-image:url('./icons/api_health.png');"></div>
+      <div class="content">
+        <h3>API Health</h3>
+        <p>http://127.0.0.1:8000/status/health</p>
+        <span class="badge badge-ok">Healthy</span>
+      </div>
+    </a>
+
+    <a class="card" href="http://127.0.0.1:5678/" target="_blank">
       <div class="icon" style="background-image:url('./icons/n8n.png');"></div>
       <div class="content">
         <h3>n8n</h3>
-        <p>http://samsung.tailf17266.ts.net:5678/</p>
-        <span class="badge">Automação</span>
+        <p>http://127.0.0.1:5678/</p>
+        <span class="badge">Entrada / Saída</span>
       </div>
     </a>
 
-    <a class="card disable" href="#" onclick="return false;">
-      <div class="icon" style="background-image:url('./icons/erpnext.png');"></div>
+    <a class="card" href="http://127.0.0.1:8080/manager/" target="_blank">
+      <div class="icon" style="background-image:url('./icons/evolution-api.png');"></div>
       <div class="content">
-        <h3>ERPNext</h3>
-        <p>Serviço planejado para fase posterior do MVP</p>
-        <span class="badge badge-dev">Não ativo</span>
+        <h3>Evolution API</h3>
+        <p>http://127.0.0.1:8080/manager/</p>
+        <span class="badge">WhatsApp API</span>
       </div>
     </a>
 
@@ -191,96 +223,43 @@
 </section>
 
 <section>
-  <div class="section-title">Dados, arquivos e identidade</div>
+  <div class="section-title">Dados, arquivos e observabilidade</div>
 
   <div class="grid">
 
-    <a class="card" href="http://minio-console.localhost" target="_blank">
+    <a class="card" href="http://127.0.0.1:9001/" target="_blank">
       <div class="icon" style="background-image:url('./icons/minio.png');"></div>
       <div class="content">
         <h3>MinIO Console</h3>
-        <p>http://minio-console.localhost</p>
+        <p>http://127.0.0.1:9001/</p>
         <span class="badge">Documentos</span>
       </div>
     </a>
 
-    <a class="card" href="http://sso.localhost" target="_blank">
-      <div class="icon" style="background-image:url('./icons/keycloak.png');"></div>
+    <a class="card" href="http://127.0.0.1:9000/" target="_blank">
+      <div class="icon" style="background-image:url('./icons/minio.png');"></div>
       <div class="content">
-        <h3>Keycloak</h3>
-        <p>http://sso.localhost</p>
-        <span class="badge">SSO / IAM</span>
+        <h3>MinIO S3</h3>
+        <p>http://127.0.0.1:9000/</p>
+        <span class="badge">Object Storage</span>
       </div>
     </a>
 
-    <a class="card" href="http://pgadmin.localhost" target="_blank">
-      <div class="icon" style="background-image:url('./icons/pgadmin.png');"></div>
-      <div class="content">
-        <h3>pgAdmin</h3>
-        <p>http://pgadmin.localhost</p>
-        <span class="badge badge-dev">Perfil dev</span>
-      </div>
-    </a>
-
-  </div>
-</section>
-
-<section>
-  <div class="section-title">API, BI e observabilidade</div>
-
-  <div class="grid">
-
-    <a class="card" href="http://localhost:8080/manager/" target="_blank">
-      <div class="icon" style="background-image:url('./icons/evolution-api.png');"></div>
-      <div class="content">
-        <h3>Evolution-Api</h3>
-        <p>http://localhost:8080/manager/</p>
-        <span class="badge">Whatsap-api</span>
-      </div>
-    </a>
-
-    <a class="card" href="http://api.localhost/docs" target="_blank">
-      <div class="icon" style="background-image:url('./icons/api_docs.png');"></div>
-      <div class="content">
-        <h3>API Docs</h3>
-        <p>http://api.localhost/docs</p>
-        <span class="badge">FastAPI</span>
-      </div>
-    </a>
-
-    <a class="card" href="http://api.localhost/status/health" target="_blank">
-      <div class="icon" style="background-image:url('./icons/api_health.png');"></div>
-      <div class="content">
-        <h3>API Health</h3>
-        <p>http://api.localhost/status/health</p>
-        <span class="badge">Status</span>
-      </div>
-    </a>
-
-    <a class="card" href="http://grafana.localhost" target="_blank">
+    <a class="card" href="http://127.0.0.1:13001/" target="_blank">
       <div class="icon" style="background-image:url('./icons/grafana.png');"></div>
       <div class="content">
         <h3>Grafana</h3>
-        <p>http://grafana.localhost</p>
+        <p>http://127.0.0.1:13001/</p>
         <span class="badge">Dashboards</span>
       </div>
     </a>
 
-    <a class="card" href="http://prometheus.localhost" target="_blank">
-      <div class="icon" style="background-image:url('./icons/prometheus.png');"></div>
+    <a class="card disabled" href="#" onclick="return false;">
+      <div class="icon" style="background-image:url('./icons/postgres.png');"></div>
       <div class="content">
-        <h3>Prometheus</h3>
-        <p>http://prometheus.localhost</p>
-        <span class="badge">Métricas</span>
-      </div>
-    </a>
-
-    <a class="card" href="http://superset.localhost" target="_blank">
-      <div class="icon" style="background-image:url('./icons/superset.png');"></div>
-      <div class="content">
-        <h3>Superset</h3>
-        <p>http://superset.localhost</p>
-        <span class="badge">BI</span>
+        <h3>PostgreSQL</h3>
+        <p>Host: 127.0.0.1 | Porta: 15432 | Usar DBeaver</p>
+        <span class="badge badge-dev">Banco de dados</span>
       </div>
     </a>
 
@@ -288,18 +267,36 @@
 </section>
 
 <section>
-  <div class="section-title">Infraestrutura e repositórios</div>
+  <div class="section-title">Infraestrutura e workers</div>
 
   <div class="grid">
 
     <a class="card disabled" href="#" onclick="return false;">
-  <div class="icon" style="background-image:url('./icons/traefik.jpg');"></div>
-  <div class="content">
-    <h3>Traefik Dashboard</h3>
-    <p>Dashboard ainda não exposto diretamente</p>
-    <span class="badge badge-dev">Verificar rota</span>
-  </div>
-</a>
+      <div class="icon" style="background-image:url('./icons/agent.png');"></div>
+      <div class="content">
+        <h3>Agent Worker</h3>
+        <p>Serviço em background. Sem interface web.</p>
+        <span class="badge badge-ok">Ativo</span>
+      </div>
+    </a>
+
+    <a class="card disabled" href="#" onclick="return false;">
+      <div class="icon" style="background-image:url('./icons/redis.png');"></div>
+      <div class="content">
+        <h3>Redis</h3>
+        <p>Fila/cache interno. Sem interface web.</p>
+        <span class="badge badge-ok">Ativo</span>
+      </div>
+    </a>
+
+    <a class="card disabled" href="#" onclick="return false;">
+      <div class="icon" style="background-image:url('./icons/traefik.jpg');"></div>
+      <div class="content">
+        <h3>Traefik</h3>
+        <p>Proxy reverso ativo em 80/443. Dashboard não exposto.</p>
+        <span class="badge badge-dev">Infra</span>
+      </div>
+    </a>
 
     <a class="card" href="https://github.com/TanoueH" target="_blank">
       <div class="icon" style="background-image:url('./icons/github.png');"></div>
@@ -313,9 +310,72 @@
   </div>
 </section>
 
+<section>
+  <div class="section-title">Arquivados, removidos ou fase posterior</div>
+
+  <div class="grid">
+
+    <a class="card disabled" href="#" onclick="return false;">
+      <div class="icon" style="background-image:url('./icons/openproject.png');"></div>
+      <div class="content">
+        <h3>OpenProject</h3>
+        <p>Removido do compose MVP. Pode voltar em profile posterior.</p>
+        <span class="badge badge-off">Não ativo</span>
+      </div>
+    </a>
+
+    <a class="card disabled" href="#" onclick="return false;">
+      <div class="icon" style="background-image:url('./icons/keycloak.png');"></div>
+      <div class="content">
+        <h3>Keycloak</h3>
+        <p>Removido do MVP. IAM ficará para etapa posterior.</p>
+        <span class="badge badge-off">Não ativo</span>
+      </div>
+    </a>
+
+    <a class="card disabled" href="#" onclick="return false;">
+      <div class="icon" style="background-image:url('./icons/pgadmin.png');"></div>
+      <div class="content">
+        <h3>pgAdmin</h3>
+        <p>Removido do MVP. Usar DBeaver no host.</p>
+        <span class="badge badge-off">Não ativo</span>
+      </div>
+    </a>
+
+    <a class="card disabled" href="#" onclick="return false;">
+      <div class="icon" style="background-image:url('./icons/prometheus.png');"></div>
+      <div class="content">
+        <h3>Prometheus</h3>
+        <p>Removido do MVP. Observabilidade avançada em etapa posterior.</p>
+        <span class="badge badge-off">Não ativo</span>
+      </div>
+    </a>
+
+    <a class="card disabled" href="#" onclick="return false;">
+      <div class="icon" style="background-image:url('./icons/superset.png');"></div>
+      <div class="content">
+        <h3>Superset</h3>
+        <p>Removido do MVP. BI avançado em etapa posterior.</p>
+        <span class="badge badge-off">Não ativo</span>
+      </div>
+    </a>
+
+    <a class="card disabled" href="#" onclick="return false;">
+      <div class="icon" style="background-image:url('./icons/erpnext.png');"></div>
+      <div class="content">
+        <h3>ERPNext</h3>
+        <p>Planejado somente para fase futura, se necessário.</p>
+        <span class="badge badge-off">Não ativo</span>
+      </div>
+    </a>
+
+  </div>
+</section>
+
 <p class="muted">
-  Painel local do Garcia Tech. Os links usam as rotas Traefik definidas no docker-compose.yml.
-  Se algum serviço mudar de domínio, porta ou perfil, edite este arquivo manualmente.
+  Painel local do <strong>Construction Science Agents</strong>.
+  Os links principais usam portas publicadas no <code>docker-compose.yml</code> atual.
+  Para acesso a partir de outro dispositivo via Tailscale, será necessário revisar os binds <code>127.0.0.1</code> do compose.
 </p>
 
 </body>
