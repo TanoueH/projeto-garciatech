@@ -1,77 +1,122 @@
-.env
+# ============================================================
+
+# Python
+
+# ============================================================
+
 .venv/
-__pycache__/
+**pycache**/
 *.pyc
+*.pyo
+*.pyd
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
 
-data/raw/*
-data/staging/*
-data/processed/*
-outputs/reports/*
-outputs/exports/*
+# ============================================================
 
-!data/raw/.gitkeep
-!data/staging/.gitkeep
-!data/processed/.gitkeep
-!outputs/reports/.gitkeep
-!outputs/exports/.gitkeep
+# Environment files / secrets
 
-echo "*.swp" >> .gitignore
-echo "*.swo" >> .gitignorenano.*.save
-docs/passwordn8n.txt
-data/import/*.xlsx
-data/import/*.csv
-*.swp
-*.swo
-nano.*.save
+# ============================================================
 
-# Ambiente local
+.env
 .env.*
+*.env
+
+!.env.example
+
+# ============================================================
+
+# Local Docker Compose variants and backups
+
+# ============================================================
+
 docker-compose.override.yml
+docker-compose.*.yml
+docker-compose.yml.*
 
-# Backups
-*.bak
-*.tmp
+!docker-compose.yml
+!docker-compose.override.example.yml
 
-# Dados brutos/importados
+# ============================================================
+
+# Runtime data and imported files
+
+# ============================================================
+
 data/import/*
 data/raw/*
 data/staging/*
 data/processed/*
 
-# Mantém estrutura de pastas
 !data/import/.gitkeep
 !data/raw/.gitkeep
 !data/staging/.gitkeep
 !data/processed/.gitkeep
 
-# Outputs gerados
+# ============================================================
+
+# Generated outputs
+
+# ============================================================
+
 outputs/exports/*
 outputs/reports/*
+outputs/debug/*
 
 !outputs/exports/.gitkeep
 !outputs/reports/.gitkeep
+!outputs/debug/.gitkeep
 
-# Credenciais e segredos
-docs/password*.txt
-docs/*senha*.txt
-docs/comandos.txt
-# Local Docker Compose variants and backups
-docker-compose.override.yml
-docker-compose.*.yml
-docker-compose.yml.*
-!docker-compose.yml
-!docker-compose.override.example.yml
+# ============================================================
 
-# Local backups and debug outputs
+# Logs
+
+# ============================================================
+
+logs/*
+!logs/.gitkeep
+
+# ============================================================
+
+# Backups and temporary files
+
+# ============================================================
+
 backups/
-outputs/debug/
-
-# Local secrets
-.env
-.env.*
-*.env
-
-# Local temporary code backups
 *.bak
 *.bak_*
 *.backup
+*.tmp
+*.save
+nano.*.save
+
+# ============================================================
+
+# Editor swap files
+
+# ============================================================
+
+*.swp
+*.swo
+
+# ============================================================
+
+# Credentials and sensitive documentation
+
+# ============================================================
+
+docs/password*.txt
+docs/*senha*.txt
+docs/*secret*.txt
+docs/*token*.txt
+docs/comandos.txt
+
+# ============================================================
+
+# OS metadata
+
+# ============================================================
+
+.DS_Store
+Thumbs.db
