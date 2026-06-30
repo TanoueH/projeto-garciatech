@@ -23,6 +23,10 @@ APP_VERSION = "0.1.0"
 DATABASE_URL = os.getenv("DATABASE_URL")
 REDIS_URL = os.getenv("REDIS_URL")
 TZ = os.getenv("TZ", "America/Sao_Paulo")
+TELEGRAM_ALLOWED_USER_IDS = os.getenv("TELEGRAM_ALLOWED_USER_IDS")
+TELEGRAM_ALLOWED_CHAT_IDS = os.getenv("TELEGRAM_ALLOWED_CHAT_IDS")
+TELEGRAM_EXECUTIVE_USER_ID = os.getenv("TELEGRAM_EXECUTIVE_USER_ID")
+TELEGRAM_EXECUTIVE_CHAT_ID = os.getenv("TELEGRAM_EXECUTIVE_CHAT_ID")
 
 
 app = FastAPI(
@@ -92,6 +96,49 @@ def parse_correlation_id(value: Optional[str]) -> str:
 
 def has_any_term(texto: str, termos: list[str]) -> bool:
     return any(termo in texto for termo in termos)
+
+
+def parse_env_allowlist(*values: Optional[str]) -> set[str]:
+    allowed: set[str] = set()
+    for value in values:
+        if not value:
+            continue
+        allowed.update(part.strip() for part in value.split(",") if part.strip())
+    return allowed
+
+
+def avaliar_autorizacao_telegram(payload: TelegramEntradaPayload) -> tuple[bool, str]:
+    allowed_user_ids = parse_env_allowlist(
+        TELEGRAM_ALLOWED_USER_IDS,
+        TELEGRAM_EXECUTIVE_USER_ID,
+    )
+    allowed_chat_ids = parse_env_allowlist(
+        TELEGRAM_ALLOWED_CHAT_IDS,
+        TELEGRAM_EXECUTIVE_CHAT_ID,
+    )
+
+    if payload.telegram_user_id and payload.telegram_user_id in allowed_user_ids:
+        return True, "Autorizado por telegram_user_id configurado em variável de ambiente."
+
+    if payload.chat_id and payload.chat_id in allowed_chat_ids:
+        return True, "Autorizado por chat_id configurado em variável de ambiente."
+
+    if not allowed_user_ids and not allowed_chat_ids:
+        return (
+            False,
+            "Bloqueado: nenhuma allowlist Telegram configurada nas variáveis de ambiente.",
+        )
+
+    if not payload.telegram_user_id and not payload.chat_id:
+        return (
+            False,
+            "Bloqueado: payload não trouxe telegram_user_id nem chat_id para validação.",
+        )
+
+    return (
+        False,
+        "Bloqueado: telegram_user_id/chat_id não constam nas allowlists de ambiente.",
+    )
 
 
 def classificar_intencao_executiva(conteudo: Optional[str]) -> dict[str, Any]:
@@ -499,7 +546,7 @@ async def receber_entrada_telegram(
         )
 
     correlation_id = parse_correlation_id(x_correlation_id)
-    usuario_autorizado = bool(payload.usuario_autorizado)
+    usuario_autorizado, motivo_autorizacao = avaliar_autorizacao_telegram(payload)
     classificacao = classificar_intencao_executiva(payload.conteudo)
     if not usuario_autorizado:
         classificacao = {
@@ -510,14 +557,6 @@ async def receber_entrada_telegram(
             "confianca": 1.00,
             "justificativa": "Usuário não autorizado; comando registrado apenas para auditoria.",
         }
-    motivo_autorizacao = (
-        payload.motivo_autorizacao
-        or (
-            "Usuário autorizado para teste local via curl; sem Telegram real."
-            if usuario_autorizado
-            else "Usuário não autorizado pelo payload recebido."
-        )
-    )
 
     normalized = {
         "tenant_id": payload.tenant_id or "construtora-piloto",
@@ -542,15 +581,24 @@ async def receber_entrada_telegram(
     }
 
     payload_hash = stable_hash(raw_payload)
-    idempotency_parts = [
-        normalized["obra_codigo"],
-        normalized["canal"],
+    telegram_idempotency_parts = [
         normalized["telegram_update_id"],
         normalized["telegram_message_id"],
         normalized["chat_id"],
-        payload_hash,
     ]
-    idempotency_key = ":".join(str(part) for part in idempotency_parts if part)
+    if all(telegram_idempotency_parts):
+        idempotency_parts = [
+            normalized["obra_codigo"],
+            normalized["canal"],
+            *telegram_idempotency_parts,
+        ]
+    else:
+        idempotency_parts = [
+            normalized["obra_codigo"],
+            normalized["canal"],
+            payload_hash,
+        ]
+    idempotency_key = ":".join(str(part) for part in idempotency_parts)
 
     status_comando = (
         "AGUARDANDO_APROVACAO"
