@@ -44,6 +44,25 @@ class EntradaPayload(BaseModel):
     payload_original: Optional[Dict[str, Any]] = Field(default_factory=dict)
 
 
+class TelegramEntradaPayload(BaseModel):
+    tenant_id: Optional[str] = Field(default="construtora-piloto")
+    obra_codigo: Optional[str] = Field(default="OBRA-CAIO")
+    telegram_update_id: Optional[str] = None
+    telegram_message_id: Optional[str] = None
+    telegram_user_id: Optional[str] = None
+    telegram_username: Optional[str] = None
+    chat_id: Optional[str] = None
+    chat_type: Optional[str] = None
+    remetente_nome: Optional[str] = None
+    remetente_identificador: Optional[str] = None
+    usuario_autorizado: Optional[bool] = Field(default=False)
+    motivo_autorizacao: Optional[str] = None
+    tipo_mensagem: Optional[str] = "texto"
+    conteudo: Optional[str] = None
+    anexos: Optional[list[dict[str, Any]]] = Field(default_factory=list)
+    payload_original: Optional[Dict[str, Any]] = Field(default_factory=dict)
+
+
 def get_db_connection():
     if not DATABASE_URL:
         raise RuntimeError("DATABASE_URL não definida.")
@@ -53,6 +72,174 @@ def get_db_connection():
 def stable_hash(data: Any) -> str:
     raw = json.dumps(data, ensure_ascii=False, sort_keys=True, default=str)
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
+def parse_correlation_id(value: Optional[str]) -> str:
+    if not value:
+        return str(uuid.uuid4())
+
+    try:
+        return str(uuid.UUID(value))
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "message": "X-Correlation-Id inválido. Use um UUID válido.",
+                "error": str(exc),
+            },
+        )
+
+
+def has_any_term(texto: str, termos: list[str]) -> bool:
+    return any(termo in texto for termo in termos)
+
+
+def classificar_intencao_executiva(conteudo: Optional[str]) -> dict[str, Any]:
+    texto = (conteudo or "").lower()
+
+    if has_any_term(texto, ["confirmar", "confirmo", "aprovado", "aprovar"]):
+        return {
+            "intencao": "CONFIRMAR_COMANDO",
+            "agente_destino": "AGENTE_007_ORQUESTRADOR_EXECUTIVO",
+            "tipo_comando": "CONFIRMAR_COMANDO_EXECUTIVO",
+            "requer_aprovacao": False,
+            "confianca": 0.90,
+            "justificativa": "Mensagem indica confirmação ou aprovação executiva.",
+        }
+
+    if has_any_term(texto, ["cancelar", "cancele", "rejeitar", "rejeito", "não aprovar", "nao aprovar"]):
+        return {
+            "intencao": "CANCELAR_COMANDO",
+            "agente_destino": "AGENTE_007_ORQUESTRADOR_EXECUTIVO",
+            "tipo_comando": "CANCELAR_COMANDO_EXECUTIVO",
+            "requer_aprovacao": False,
+            "confianca": 0.90,
+            "justificativa": "Mensagem indica cancelamento ou rejeição executiva.",
+        }
+
+    if has_any_term(
+        texto,
+        ["imprimir", "impressão", "impressao", "imprima", "mande imprimir", "solicite impressão", "solicite impressao"],
+    ):
+        return {
+            "intencao": "SOLICITAR_IMPRESSAO",
+            "agente_destino": "AGENTE_007_ORQUESTRADOR_EXECUTIVO",
+            "tipo_comando": "SOLICITAR_IMPRESSAO",
+            "requer_aprovacao": True,
+            "confianca": 0.86,
+            "justificativa": "Solicitação de impressão exige aprovação e não executa impressão real nesta etapa.",
+        }
+
+    if has_any_term(
+        texto,
+        [
+            "atualizar rdo",
+            "alterar rdo",
+            "corrigir rdo",
+            "mudar rdo",
+            "atualize o rdo",
+            "atualiza o rdo",
+            "atualizar o rdo",
+            "atualize rdo",
+            "atualiza rdo",
+            "lançar rdo",
+            "lancar rdo",
+            "registrar rdo",
+            "fechar rdo",
+        ],
+    ):
+        return {
+            "intencao": "ATUALIZAR_RDO",
+            "agente_destino": "AGENTE_RDO",
+            "tipo_comando": "ATUALIZAR_RDO",
+            "requer_aprovacao": True,
+            "confianca": 0.88,
+            "justificativa": "Alteração de RDO é ação sensível e não altera RDO oficial nesta etapa.",
+        }
+
+    if has_any_term(
+        texto,
+        [
+            "gerar pdf",
+            "pdf do rdo",
+            "rdo em pdf",
+            "exportar rdo",
+            "gere o pdf",
+            "gerar o pdf",
+            "faça o pdf",
+            "faca o pdf",
+            "cópia em pdf",
+            "copia em pdf",
+            "exporte o rdo",
+        ],
+    ):
+        return {
+            "intencao": "GERAR_PDF_RDO",
+            "agente_destino": "AGENTE_RDO",
+            "tipo_comando": "GERAR_PDF_RDO",
+            "requer_aprovacao": False,
+            "confianca": 0.86,
+            "justificativa": "Solicitação registrada apenas como comando; nenhum PDF real é gerado nesta etapa.",
+        }
+
+    if has_any_term(texto, ["rdo", "diário", "diario", "relatório diário", "relatorio diario"]):
+        return {
+            "intencao": "CONSULTAR_RDO",
+            "agente_destino": "AGENTE_RDO",
+            "tipo_comando": "CONSULTAR_RDO",
+            "requer_aprovacao": False,
+            "confianca": 0.82,
+            "justificativa": "Mensagem classificada como consulta executiva de RDO.",
+        }
+
+    if has_any_term(texto, ["pendência", "pendencia", "problema", "atraso", "crítico", "critico"]):
+        return {
+            "intencao": "CONSULTAR_PENDENCIAS",
+            "agente_destino": "AGENTE_PENDENCIAS",
+            "tipo_comando": "CONSULTAR_PENDENCIAS",
+            "requer_aprovacao": False,
+            "confianca": 0.82,
+            "justificativa": "Mensagem classificada como consulta de pendências.",
+        }
+
+    if has_any_term(texto, ["documento", "nota fiscal", "nf-e", "nfe", "contrato", "arquivo"]):
+        return {
+            "intencao": "CONSULTAR_DOCUMENTOS",
+            "agente_destino": "AGENTE_DOCUMENTOS",
+            "tipo_comando": "CONSULTAR_DOCUMENTOS",
+            "requer_aprovacao": False,
+            "confianca": 0.80,
+            "justificativa": "Mensagem classificada como consulta documental.",
+        }
+
+    if has_any_term(texto, ["orçamento", "orcamento", "cotação", "cotacao", "proposta"]):
+        return {
+            "intencao": "CONSULTAR_ORCAMENTOS",
+            "agente_destino": "AGENTE_ORCAMENTOS",
+            "tipo_comando": "CONSULTAR_ORCAMENTOS",
+            "requer_aprovacao": False,
+            "confianca": 0.78,
+            "justificativa": "Mensagem classificada como consulta de orçamentos.",
+        }
+
+    if has_any_term(texto, ["cronograma", "prazo", "marco", "planejamento"]):
+        return {
+            "intencao": "CONSULTAR_CRONOGRAMA",
+            "agente_destino": "AGENTE_CRONOGRAMA",
+            "tipo_comando": "CONSULTAR_CRONOGRAMA",
+            "requer_aprovacao": False,
+            "confianca": 0.78,
+            "justificativa": "Mensagem classificada como consulta de cronograma.",
+        }
+
+    return {
+        "intencao": "MENSAGEM_EXECUTIVA_GERAL",
+        "agente_destino": "AGENTE_007_ORQUESTRADOR_EXECUTIVO",
+        "tipo_comando": "TRIAGEM_EXECUTIVA",
+        "requer_aprovacao": False,
+        "confianca": 0.50,
+        "justificativa": "Mensagem sem intenção executiva específica no classificador determinístico mínimo.",
+    }
 
 
 def ensure_core_tables() -> None:
@@ -290,6 +477,351 @@ async def receber_entrada(
         "idempotency_key": idempotency_key,
         "next_action": "CLASSIFICAR",
         "message": "Entrada registrada com sucesso.",
+    }
+
+
+@app.post("/telegram/entrada")
+async def receber_entrada_telegram(
+    request: Request,
+    x_correlation_id: Optional[str] = Header(default=None),
+):
+    raw_payload = await request.json()
+
+    try:
+        payload = TelegramEntradaPayload(**raw_payload)
+    except Exception as exc:
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "message": "Payload inválido para entrada Telegram.",
+                "error": str(exc),
+            },
+        )
+
+    correlation_id = parse_correlation_id(x_correlation_id)
+    usuario_autorizado = bool(payload.usuario_autorizado)
+    classificacao = classificar_intencao_executiva(payload.conteudo)
+    if not usuario_autorizado:
+        classificacao = {
+            "intencao": "USUARIO_NAO_AUTORIZADO",
+            "agente_destino": "AGENTE_007_ORQUESTRADOR_EXECUTIVO",
+            "tipo_comando": "BLOQUEAR_ENTRADA_NAO_AUTORIZADA",
+            "requer_aprovacao": True,
+            "confianca": 1.00,
+            "justificativa": "Usuário não autorizado; comando registrado apenas para auditoria.",
+        }
+    motivo_autorizacao = (
+        payload.motivo_autorizacao
+        or (
+            "Usuário autorizado para teste local via curl; sem Telegram real."
+            if usuario_autorizado
+            else "Usuário não autorizado pelo payload recebido."
+        )
+    )
+
+    normalized = {
+        "tenant_id": payload.tenant_id or "construtora-piloto",
+        "obra_codigo": payload.obra_codigo or "OBRA-CAIO",
+        "canal": "telegram",
+        "telegram_update_id": payload.telegram_update_id,
+        "telegram_message_id": payload.telegram_message_id,
+        "telegram_user_id": payload.telegram_user_id,
+        "telegram_username": payload.telegram_username,
+        "chat_id": payload.chat_id,
+        "chat_type": payload.chat_type,
+        "remetente_nome": payload.remetente_nome,
+        "remetente_identificador": payload.remetente_identificador,
+        "usuario_autorizado": usuario_autorizado,
+        "motivo_autorizacao": motivo_autorizacao,
+        "tipo_mensagem": payload.tipo_mensagem or "texto",
+        "conteudo": payload.conteudo,
+        "anexos": payload.anexos or [],
+        "correlation_id": correlation_id,
+        "intencao": classificacao["intencao"],
+        "agente_destino": classificacao["agente_destino"],
+    }
+
+    payload_hash = stable_hash(raw_payload)
+    idempotency_parts = [
+        normalized["obra_codigo"],
+        normalized["canal"],
+        normalized["telegram_update_id"],
+        normalized["telegram_message_id"],
+        normalized["chat_id"],
+        payload_hash,
+    ]
+    idempotency_key = ":".join(str(part) for part in idempotency_parts if part)
+
+    status_comando = (
+        "AGUARDANDO_APROVACAO"
+        if classificacao["requer_aprovacao"]
+        else "PENDENTE"
+    )
+
+    insert_evento_sql = """
+    INSERT INTO eventos_telegram (
+        tenant_id,
+        obra_codigo,
+        canal,
+        telegram_update_id,
+        telegram_message_id,
+        telegram_user_id,
+        telegram_username,
+        chat_id,
+        chat_type,
+        remetente_nome,
+        remetente_identificador,
+        usuario_autorizado,
+        motivo_autorizacao,
+        tipo_mensagem,
+        conteudo,
+        anexos,
+        payload_original,
+        payload_normalizado,
+        payload_hash,
+        idempotency_key,
+        correlation_id,
+        intencao,
+        confianca,
+        agente_destino,
+        status_processamento
+    )
+    VALUES (
+        %(tenant_id)s,
+        %(obra_codigo)s,
+        'telegram',
+        %(telegram_update_id)s,
+        %(telegram_message_id)s,
+        %(telegram_user_id)s,
+        %(telegram_username)s,
+        %(chat_id)s,
+        %(chat_type)s,
+        %(remetente_nome)s,
+        %(remetente_identificador)s,
+        %(usuario_autorizado)s,
+        %(motivo_autorizacao)s,
+        %(tipo_mensagem)s,
+        %(conteudo)s,
+        %(anexos)s,
+        %(payload_original)s,
+        %(payload_normalizado)s,
+        %(payload_hash)s,
+        %(idempotency_key)s,
+        %(correlation_id)s,
+        %(intencao)s,
+        %(confianca)s,
+        %(agente_destino)s,
+        'CLASSIFICADO'
+    )
+    ON CONFLICT (idempotency_key)
+    DO NOTHING
+    RETURNING id, status_processamento;
+    """
+
+    select_evento_sql = """
+    SELECT id, 'DUPLICADO' AS status_processamento
+    FROM eventos_telegram
+    WHERE idempotency_key = %(idempotency_key)s;
+    """
+
+    insert_comando_sql = """
+    INSERT INTO comandos_executivos (
+        id_comando,
+        evento_telegram_id,
+        tenant_id,
+        obra_codigo,
+        correlation_id,
+        agente_origem,
+        agente_destino,
+        tipo_comando,
+        payload_comando,
+        justificativa,
+        status,
+        requer_aprovacao,
+        evidencias
+    )
+    VALUES (
+        %(id_comando)s,
+        %(evento_telegram_id)s,
+        %(tenant_id)s,
+        %(obra_codigo)s,
+        %(correlation_id)s,
+        'AGENTE_007_ORQUESTRADOR_EXECUTIVO',
+        %(agente_destino)s,
+        %(tipo_comando)s,
+        %(payload_comando)s,
+        %(justificativa)s,
+        %(status)s,
+        %(requer_aprovacao)s,
+        '[]'::jsonb
+    )
+    ON CONFLICT (evento_telegram_id)
+    WHERE evento_telegram_id IS NOT NULL
+    DO NOTHING
+    RETURNING id, id_comando, status;
+    """
+
+    select_comando_sql = """
+    SELECT id, id_comando, status
+    FROM comandos_executivos
+    WHERE evento_telegram_id = %(evento_telegram_id)s
+    ORDER BY id
+    LIMIT 1;
+    """
+
+    update_evento_sql = """
+    UPDATE eventos_telegram
+    SET status_processamento = 'COMANDO_GERADO',
+        atualizado_em = NOW()
+    WHERE id = %(evento_telegram_id)s
+      AND status_processamento <> 'COMANDO_GERADO';
+    """
+
+    evento_row = None
+    comando_row = None
+    evento_duplicado = False
+
+    try:
+        conn = get_db_connection()
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    insert_evento_sql,
+                    {
+                        "tenant_id": normalized["tenant_id"],
+                        "obra_codigo": normalized["obra_codigo"],
+                        "telegram_update_id": normalized["telegram_update_id"],
+                        "telegram_message_id": normalized["telegram_message_id"],
+                        "telegram_user_id": normalized["telegram_user_id"],
+                        "telegram_username": normalized["telegram_username"],
+                        "chat_id": normalized["chat_id"],
+                        "chat_type": normalized["chat_type"],
+                        "remetente_nome": normalized["remetente_nome"],
+                        "remetente_identificador": normalized["remetente_identificador"],
+                        "usuario_autorizado": normalized["usuario_autorizado"],
+                        "motivo_autorizacao": normalized["motivo_autorizacao"],
+                        "tipo_mensagem": normalized["tipo_mensagem"],
+                        "conteudo": normalized["conteudo"],
+                        "anexos": Json(normalized["anexos"]),
+                        "payload_original": Json(raw_payload),
+                        "payload_normalizado": Json(normalized),
+                        "payload_hash": payload_hash,
+                        "idempotency_key": idempotency_key,
+                        "correlation_id": correlation_id,
+                        "intencao": classificacao["intencao"],
+                        "confianca": classificacao["confianca"],
+                        "agente_destino": classificacao["agente_destino"],
+                    },
+                )
+                evento_row = cur.fetchone()
+
+                if evento_row is None:
+                    cur.execute(
+                        select_evento_sql,
+                        {"idempotency_key": idempotency_key},
+                    )
+                    evento_row = cur.fetchone()
+                    evento_duplicado = True
+
+                if evento_row is None:
+                    raise RuntimeError("Evento Telegram não foi registrado nem recuperado.")
+
+                evento_id = evento_row[0]
+                payload_comando = {
+                    "modo": "curl_local_sem_integracoes_externas",
+                    "proibicoes": [
+                        "nao_conectar_telegram_real",
+                        "nao_usar_openclaw",
+                        "nao_executar_rpa",
+                        "nao_imprimir",
+                        "nao_gerar_pdf_real",
+                        "nao_alterar_rdo_oficial",
+                    ],
+                    "entrada": normalized,
+                    "classificacao": classificacao,
+                }
+
+                cur.execute(
+                    insert_comando_sql,
+                    {
+                        "id_comando": str(uuid.uuid4()),
+                        "evento_telegram_id": evento_id,
+                        "tenant_id": normalized["tenant_id"],
+                        "obra_codigo": normalized["obra_codigo"],
+                        "correlation_id": correlation_id,
+                        "agente_destino": classificacao["agente_destino"],
+                        "tipo_comando": classificacao["tipo_comando"],
+                        "payload_comando": Json(payload_comando),
+                        "justificativa": classificacao["justificativa"],
+                        "status": status_comando,
+                        "requer_aprovacao": classificacao["requer_aprovacao"],
+                    },
+                )
+                comando_row = cur.fetchone()
+
+                if comando_row is None:
+                    cur.execute(
+                        select_comando_sql,
+                        {"evento_telegram_id": evento_id},
+                    )
+                    comando_row = cur.fetchone()
+
+                cur.execute(
+                    update_evento_sql,
+                    {"evento_telegram_id": evento_id},
+                )
+
+            conn.commit()
+
+        except Exception:
+            conn.rollback()
+            raise
+
+        finally:
+            conn.close()
+
+    except Exception as exc:
+        raise HTTPException(
+            status_code=500,
+            detail={
+                "message": "Erro ao registrar entrada Telegram e comando executivo.",
+                "error": str(exc),
+                "idempotency_key": idempotency_key,
+            },
+        )
+
+    if comando_row is None:
+        raise HTTPException(
+            status_code=500,
+            detail={
+                "message": "Falha ao registrar ou recuperar comando executivo.",
+                "idempotency_key": idempotency_key,
+            },
+        )
+
+    return {
+        "ok": True,
+        "evento_telegram_id": evento_row[0],
+        "status_recebimento": evento_row[1],
+        "status_evento": "COMANDO_GERADO",
+        "evento_duplicado": evento_duplicado,
+        "comando_executivo_id": comando_row[0],
+        "id_comando": str(comando_row[1]),
+        "status_comando": comando_row[2],
+        "tenant_id": normalized["tenant_id"],
+        "obra_codigo": normalized["obra_codigo"],
+        "correlation_id": correlation_id,
+        "idempotency_key": idempotency_key,
+        "usuario_autorizado": usuario_autorizado,
+        "motivo_autorizacao": motivo_autorizacao,
+        "intencao": classificacao["intencao"],
+        "confianca": classificacao["confianca"],
+        "agente_origem": "AGENTE_007_ORQUESTRADOR_EXECUTIVO",
+        "agente_destino": classificacao["agente_destino"],
+        "tipo_comando": classificacao["tipo_comando"],
+        "requer_aprovacao": classificacao["requer_aprovacao"],
+        "next_action": "COMANDO_AUDITAVEL_REGISTRADO_SEM_EXECUCAO_EXTERNA",
+        "message": "Entrada Telegram registrada e classificada sem integrações externas.",
     }
 
 
