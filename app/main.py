@@ -67,6 +67,10 @@ class TelegramEntradaPayload(BaseModel):
     payload_original: Optional[Dict[str, Any]] = Field(default_factory=dict)
 
 
+class ProcessarComandoRDORequest(BaseModel):
+    id_comando: Optional[str] = None
+
+
 def get_db_connection():
     if not DATABASE_URL:
         raise RuntimeError("DATABASE_URL não definida.")
@@ -286,6 +290,171 @@ def classificar_intencao_executiva(conteudo: Optional[str]) -> dict[str, Any]:
         "requer_aprovacao": False,
         "confianca": 0.50,
         "justificativa": "Mensagem sem intenção executiva específica no classificador determinístico mínimo.",
+    }
+
+
+def table_exists(conn, qualified_name: str) -> bool:
+    with conn.cursor() as cur:
+        cur.execute("SELECT to_regclass(%s);", (qualified_name,))
+        row = cur.fetchone()
+    return bool(row and row[0])
+
+
+def listar_pendencias_rdo(conn, obra_codigo: Optional[str]) -> list[dict[str, Any]]:
+    if not obra_codigo:
+        return []
+
+    if table_exists(conn, "public.pendencias_obra"):
+        sql = """
+        SELECT
+            descricao,
+            categoria,
+            prioridade,
+            status_pendencia,
+            responsavel_acao,
+            prazo_limite
+        FROM public.pendencias_obra
+        WHERE obra_codigo = %(obra_codigo)s
+        ORDER BY criado_em DESC
+        LIMIT 5;
+        """
+        with conn.cursor() as cur:
+            cur.execute(sql, {"obra_codigo": obra_codigo})
+            return [
+                {
+                    "descricao": row[0],
+                    "categoria": row[1],
+                    "prioridade": row[2],
+                    "status": row[3],
+                    "responsavel": row[4],
+                    "prazo_limite": row[5].isoformat() if row[5] else None,
+                }
+                for row in cur.fetchall()
+            ]
+
+    if table_exists(conn, "core.pendencias"):
+        sql = """
+        SELECT
+            p.titulo,
+            p.descricao,
+            p.categoria,
+            p.prioridade,
+            p.status,
+            p.responsavel,
+            p.data_limite
+        FROM core.pendencias AS p
+        JOIN core.obras AS o ON o.id = p.obra_id
+        WHERE o.codigo_obra = %(obra_codigo)s
+        ORDER BY p.data_abertura DESC
+        LIMIT 5;
+        """
+        with conn.cursor() as cur:
+            cur.execute(sql, {"obra_codigo": obra_codigo})
+            return [
+                {
+                    "titulo": row[0],
+                    "descricao": row[1],
+                    "categoria": row[2],
+                    "prioridade": row[3],
+                    "status": row[4],
+                    "responsavel": row[5],
+                    "prazo_limite": row[6].isoformat() if row[6] else None,
+                }
+                for row in cur.fetchall()
+            ]
+
+    return []
+
+
+def listar_eventos_rdo(conn, obra_codigo: Optional[str]) -> list[dict[str, Any]]:
+    if not obra_codigo or not table_exists(conn, "core.eventos_obra"):
+        return []
+
+    sql = """
+    SELECT
+        e.titulo,
+        e.descricao,
+        e.tipo_evento,
+        e.data_evento,
+        e.responsavel,
+        e.severidade
+    FROM core.eventos_obra AS e
+    JOIN core.obras AS o ON o.id = e.obra_id
+    WHERE o.codigo_obra = %(obra_codigo)s
+    ORDER BY e.data_evento DESC NULLS LAST, e.created_at DESC
+    LIMIT 5;
+    """
+    with conn.cursor() as cur:
+        cur.execute(sql, {"obra_codigo": obra_codigo})
+        return [
+            {
+                "titulo": row[0],
+                "descricao": row[1],
+                "tipo_evento": row[2],
+                "data_evento": row[3].isoformat() if row[3] else None,
+                "responsavel": row[4],
+                "severidade": row[5],
+            }
+            for row in cur.fetchall()
+        ]
+
+
+def montar_resultado_agente_rdo(
+    comando: dict[str, Any],
+    pendencias: list[dict[str, Any]],
+    eventos: list[dict[str, Any]],
+) -> dict[str, Any]:
+    tipo_comando = comando["tipo_comando"]
+    payload_comando = comando["payload_comando"] or {}
+    entrada = payload_comando.get("entrada", {})
+    conteudo = entrada.get("conteudo")
+
+    tipo_resultado = (
+        "RASCUNHO_RDO"
+        if tipo_comando in {"ATUALIZAR_RDO", "GERAR_PDF_RDO"}
+        else "RESUMO_EXECUTIVO_RDO"
+    )
+
+    return {
+        "tipo_resultado": tipo_resultado,
+        "agente": "AGENTE_002_GERADOR_RDO",
+        "agente_alias_compatibilidade": "AGENTE_RDO",
+        "modo_processamento": "DETERMINISTICO_MOCK",
+        "id_comando": str(comando["id_comando"]),
+        "correlation_id": str(comando["correlation_id"]),
+        "obra_codigo": comando["obra_codigo"],
+        "tipo_comando": tipo_comando,
+        "resumo": {
+            "titulo": "Resumo executivo operacional de RDO",
+            "mensagem_origem": conteudo,
+            "total_pendencias_consultadas": len(pendencias),
+            "total_eventos_consultados": len(eventos),
+            "observacao": "Resultado preliminar gerado sem LLM externo e sem ações externas.",
+        },
+        "rascunho_rdo": {
+            "status": "RASCUNHO_NAO_OFICIAL",
+            "atividades": [],
+            "pendencias_referenciadas": pendencias,
+            "eventos_referenciados": eventos,
+            "campos_a_confirmar": [
+                "data do RDO",
+                "atividades executadas",
+                "equipe",
+                "equipamentos",
+                "condicoes_climaticas",
+                "evidencias",
+            ],
+        },
+        "controles_operacionais": {
+            "alterou_rdo_oficial": False,
+            "gerou_pdf_real": False,
+            "imprimiu": False,
+            "enviou_mensagem_terceiros": False,
+            "conectou_openclaw": False,
+            "executou_rpa": False,
+            "requer_aprovacao_para_oficializar": True,
+        },
+        "gerado_em": datetime.now(timezone.utc).isoformat(),
     }
 
 
@@ -870,6 +1039,149 @@ async def receber_entrada_telegram(
         "requer_aprovacao": classificacao["requer_aprovacao"],
         "next_action": "COMANDO_AUDITAVEL_REGISTRADO_SEM_EXECUCAO_EXTERNA",
         "message": "Entrada Telegram registrada e classificada sem integrações externas.",
+    }
+
+
+@app.post("/agentes/rdo/processar-comando")
+async def processar_comando_agente_rdo(
+    payload: Optional[ProcessarComandoRDORequest] = None,
+):
+    id_comando = payload.id_comando if payload else None
+    if id_comando:
+        try:
+            id_comando = str(uuid.UUID(id_comando))
+        except ValueError as exc:
+            raise HTTPException(
+                status_code=422,
+                detail={
+                    "message": "id_comando inválido. Use um UUID válido.",
+                    "error": str(exc),
+                },
+            )
+
+    select_comando_sql = """
+    SELECT
+        id,
+        id_comando,
+        tenant_id,
+        obra_codigo,
+        correlation_id,
+        agente_origem,
+        agente_destino,
+        tipo_comando,
+        payload_comando,
+        status,
+        requer_aprovacao
+    FROM comandos_executivos
+    WHERE agente_destino = 'AGENTE_RDO'
+      AND status = 'PENDENTE'
+      AND (%(id_comando)s::uuid IS NULL OR id_comando = %(id_comando)s::uuid)
+    ORDER BY criado_em
+    LIMIT 1
+    FOR UPDATE;
+    """
+
+    update_resultado_sql = """
+    UPDATE comandos_executivos
+    SET resultado = %(resultado)s,
+        executado_por = 'AGENTE_002_GERADOR_RDO',
+        executado_em = NOW(),
+        mensagem_erro = NULL,
+        atualizado_em = NOW()
+    WHERE id = %(id)s
+      AND status = 'PENDENTE'
+    RETURNING id;
+    """
+
+    update_status_sql = """
+    UPDATE comandos_executivos
+    SET status = 'CONCLUIDO',
+        atualizado_em = NOW()
+    WHERE id = %(id)s
+      AND status = 'PENDENTE'
+      AND resultado IS NOT NULL
+    RETURNING id, id_comando, status, resultado;
+    """
+
+    try:
+        conn = get_db_connection()
+        try:
+            with conn.cursor() as cur:
+                cur.execute(select_comando_sql, {"id_comando": id_comando})
+                row = cur.fetchone()
+
+                if row is None:
+                    conn.rollback()
+                    return {
+                        "ok": True,
+                        "processado": False,
+                        "agente_destino": "AGENTE_RDO",
+                        "message": "Nenhum comando PENDENTE para AGENTE_RDO encontrado.",
+                    }
+
+                comando = {
+                    "id": row[0],
+                    "id_comando": row[1],
+                    "tenant_id": row[2],
+                    "obra_codigo": row[3],
+                    "correlation_id": row[4],
+                    "agente_origem": row[5],
+                    "agente_destino": row[6],
+                    "tipo_comando": row[7],
+                    "payload_comando": row[8],
+                    "status": row[9],
+                    "requer_aprovacao": row[10],
+                }
+
+                pendencias = listar_pendencias_rdo(conn, comando["obra_codigo"])
+                eventos = listar_eventos_rdo(conn, comando["obra_codigo"])
+                resultado = montar_resultado_agente_rdo(comando, pendencias, eventos)
+
+                cur.execute(
+                    update_resultado_sql,
+                    {
+                        "id": comando["id"],
+                        "resultado": Json(resultado),
+                    },
+                )
+                resultado_row = cur.fetchone()
+                if resultado_row is None:
+                    raise RuntimeError("Resultado do comando RDO não foi salvo.")
+
+                cur.execute(update_status_sql, {"id": comando["id"]})
+                concluido_row = cur.fetchone()
+                if concluido_row is None:
+                    raise RuntimeError("Status do comando RDO não foi atualizado para CONCLUIDO.")
+
+            conn.commit()
+
+        except Exception:
+            conn.rollback()
+            raise
+
+        finally:
+            conn.close()
+
+    except Exception as exc:
+        raise HTTPException(
+            status_code=500,
+            detail={
+                "message": "Erro ao processar comando executivo do Agente RDO.",
+                "error": str(exc),
+            },
+        )
+
+    return {
+        "ok": True,
+        "processado": True,
+        "comando_executivo_id": concluido_row[0],
+        "id_comando": str(concluido_row[1]),
+        "status_comando": concluido_row[2],
+        "tipo_resultado": concluido_row[3].get("tipo_resultado"),
+        "agente_destino": "AGENTE_RDO",
+        "agente_processador": "AGENTE_002_GERADOR_RDO",
+        "acoes_externas_executadas": False,
+        "message": "Comando AGENTE_RDO processado sem ações externas.",
     }
 
 
