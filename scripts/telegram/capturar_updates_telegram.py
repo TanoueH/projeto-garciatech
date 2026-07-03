@@ -8,6 +8,7 @@ import json
 import os
 import sys
 import uuid
+from pathlib import Path
 from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
@@ -15,6 +16,7 @@ from urllib.request import Request, urlopen
 
 
 DEFAULT_API_CORE_URL = "http://127.0.0.1:8000/telegram/entrada"
+DEFAULT_OFFSET_FILE = Path(".runtime/telegram/agente_007_getupdates_offset.json")
 TELEGRAM_API_BASE_URL = "https://api.telegram.org"
 REQUEST_TIMEOUT_SECONDS = 20
 
@@ -31,6 +33,20 @@ def parse_args() -> argparse.Namespace:
         type=int,
         default=None,
         help="Quantidade máxima de updates a consultar/processar nesta execução.",
+    )
+    parser.add_argument(
+        "--reset-offset",
+        action="store_true",
+        help=(
+            "Apaga/ignora o offset local antes de consultar getUpdates, permitindo "
+            "buscar novamente updates disponíveis."
+        ),
+    )
+    parser.add_argument(
+        "--offset",
+        type=int,
+        default=None,
+        help="Força manualmente o offset enviado ao getUpdates nesta execução.",
     )
     return parser.parse_args()
 
@@ -62,10 +78,68 @@ def post_json(url: str, payload: dict[str, Any], headers: dict[str, str] | None 
         return exc.code, parsed_error
 
 
-def buscar_updates(token: str, limit: int | None) -> list[dict[str, Any]]:
+def carregar_offset(path: Path) -> int | None:
+    if not path.exists():
+        return None
+
+    try:
+        with path.open("r", encoding="utf-8") as file:
+            payload = json.load(file)
+    except (OSError, json.JSONDecodeError) as exc:
+        print(
+            json.dumps(
+                {
+                    "evento": "offset_local_invalido",
+                    "arquivo": str(path),
+                    "erro_tipo": type(exc).__name__,
+                    "acao": "offset_ignorado",
+                },
+                ensure_ascii=False,
+            ),
+            file=sys.stderr,
+        )
+        return None
+
+    offset = payload.get("next_offset") if isinstance(payload, dict) else None
+    if not isinstance(offset, int) or offset < 0:
+        print(
+            json.dumps(
+                {
+                    "evento": "offset_local_invalido",
+                    "arquivo": str(path),
+                    "erro_tipo": "ValorInvalido",
+                    "acao": "offset_ignorado",
+                },
+                ensure_ascii=False,
+            ),
+            file=sys.stderr,
+        )
+        return None
+
+    return offset
+
+
+def salvar_offset(path: Path, next_offset: int) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload = {"next_offset": next_offset}
+    with path.open("w", encoding="utf-8") as file:
+        json.dump(payload, file, ensure_ascii=False, indent=2)
+        file.write("\n")
+
+
+def resetar_offset(path: Path) -> None:
+    try:
+        path.unlink()
+    except FileNotFoundError:
+        return
+
+
+def buscar_updates(token: str, limit: int | None, offset: int | None) -> list[dict[str, Any]]:
     params: dict[str, Any] = {"timeout": 0}
     if limit is not None:
         params["limit"] = limit
+    if offset is not None:
+        params["offset"] = offset
 
     url = f"{TELEGRAM_API_BASE_URL}/bot{token}/getUpdates?{urlencode(params)}"
     request = Request(url, headers={"Accept": "application/json"}, method="GET")
@@ -138,10 +212,22 @@ def resumo_resposta_api(status_code: int, body: dict[str, Any]) -> dict[str, Any
     }
 
 
+def maior_update_id(updates: list[dict[str, Any]]) -> int | None:
+    update_ids = [
+        update.get("update_id")
+        for update in updates
+        if isinstance(update.get("update_id"), int)
+    ]
+    return max(update_ids) if update_ids else None
+
+
 def main() -> int:
     args = parse_args()
     if args.limit is not None and args.limit < 1:
         print("Erro: --limit deve ser maior que zero.", file=sys.stderr)
+        return 2
+    if args.offset is not None and args.offset < 0:
+        print("Erro: --offset deve ser maior ou igual a zero.", file=sys.stderr)
         return 2
 
     token = os.getenv("TELEGRAM_BOT_TOKEN")
@@ -150,9 +236,22 @@ def main() -> int:
         return 2
 
     api_core_url = os.getenv("TELEGRAM_API_CORE_URL", DEFAULT_API_CORE_URL)
+    offset_file = DEFAULT_OFFSET_FILE
+
+    if args.reset_offset:
+        try:
+            resetar_offset(offset_file)
+        except OSError as exc:
+            print(f"Erro ao resetar offset local: {type(exc).__name__}: {exc}", file=sys.stderr)
+            return 1
+
+    offset_origem = "manual" if args.offset is not None else "local"
+    offset = args.offset if args.offset is not None else carregar_offset(offset_file)
+    if offset is None:
+        offset_origem = "nenhum"
 
     try:
-        updates = buscar_updates(token, args.limit)
+        updates = buscar_updates(token, args.limit, offset)
     except (HTTPError, URLError, TimeoutError, json.JSONDecodeError, RuntimeError) as exc:
         print(f"Erro ao consultar getUpdates: {type(exc).__name__}: {exc}", file=sys.stderr)
         return 1
@@ -172,6 +271,9 @@ def main() -> int:
                 "evento": "captura_telegram_iniciada",
                 "updates_recebidos": total_updates,
                 "limit": args.limit,
+                "offset": offset,
+                "offset_origem": offset_origem,
+                "offset_file": str(offset_file),
                 "api_core_url": api_core_url,
             },
             ensure_ascii=False,
@@ -222,6 +324,30 @@ def main() -> int:
             )
         )
 
+    max_update_id = maior_update_id(updates)
+    next_offset = max_update_id + 1 if max_update_id is not None else None
+    next_offset_salvo = None
+    if falhas == 0 and next_offset is not None:
+        try:
+            salvar_offset(offset_file, next_offset)
+        except OSError as exc:
+            print(f"Erro ao salvar offset local: {type(exc).__name__}: {exc}", file=sys.stderr)
+            return 1
+        next_offset_salvo = next_offset
+    elif falhas > 0:
+        print(
+            json.dumps(
+                {
+                    "evento": "offset_nao_avancado",
+                    "motivo": "falhas_no_envio_api_core",
+                    "falhas": falhas,
+                    "next_offset_calculado": next_offset,
+                    "offset_file": str(offset_file),
+                },
+                ensure_ascii=False,
+            )
+        )
+
     print(
         json.dumps(
             {
@@ -231,6 +357,7 @@ def main() -> int:
                 "enviados_com_sucesso": enviados,
                 "falhas": falhas,
                 "ignorados_sem_texto": ignorados,
+                "next_offset_salvo": next_offset_salvo,
             },
             ensure_ascii=False,
         )

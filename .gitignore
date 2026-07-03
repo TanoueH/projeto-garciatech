@@ -25,6 +25,9 @@
 
 !.env.example
 
+.vscode/
+.runtime/
+
 # ============================================================
 
 # Local Docker Compose variants and backups
