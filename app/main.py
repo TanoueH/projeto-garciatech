@@ -491,6 +491,26 @@ def montar_resultado_agente_rdo(
     }
 
 
+def montar_mensagem_resposta_executiva_rdo(
+    obra_codigo: Optional[str],
+    tipo_resultado: Optional[str],
+) -> Optional[str]:
+    if tipo_resultado == "RASCUNHO_RDO":
+        return (
+            f"Rascunho de RDO preparado para {obra_codigo}. "
+            "Status: rascunho não oficial. Nenhuma ação externa foi executada. "
+            "Para oficializar, será necessária aprovação."
+        )
+
+    if tipo_resultado == "RESUMO_EXECUTIVO_RDO":
+        return (
+            f"Resumo executivo de RDO preparado para {obra_codigo}. "
+            "Nenhuma ação externa foi executada."
+        )
+
+    return None
+
+
 def ensure_core_tables() -> None:
     sql = """
     CREATE TABLE IF NOT EXISTS mensagens_recebidas (
@@ -1094,24 +1114,29 @@ async def processar_comando_agente_rdo(
 
     select_comando_sql = """
     SELECT
-        id,
-        id_comando,
-        tenant_id,
-        obra_codigo,
-        correlation_id,
-        agente_origem,
-        agente_destino,
-        tipo_comando,
-        payload_comando,
-        status,
-        requer_aprovacao
-    FROM comandos_executivos
-    WHERE agente_destino = 'AGENTE_RDO'
-      AND status = 'PENDENTE'
-      AND (%(id_comando)s::uuid IS NULL OR id_comando = %(id_comando)s::uuid)
-    ORDER BY criado_em
+        ce.id,
+        ce.id_comando,
+        ce.tenant_id,
+        ce.obra_codigo,
+        ce.correlation_id,
+        ce.agente_origem,
+        ce.agente_destino,
+        ce.tipo_comando,
+        ce.payload_comando,
+        ce.status,
+        ce.requer_aprovacao,
+        et.chat_id,
+        et.telegram_user_id,
+        et.telegram_message_id
+    FROM comandos_executivos AS ce
+    LEFT JOIN eventos_telegram AS et
+        ON et.id = ce.evento_telegram_id
+    WHERE ce.agente_destino = 'AGENTE_RDO'
+      AND ce.status = 'PENDENTE'
+      AND (%(id_comando)s::uuid IS NULL OR ce.id_comando = %(id_comando)s::uuid)
+    ORDER BY ce.criado_em
     LIMIT 1
-    FOR UPDATE;
+    FOR UPDATE OF ce;
     """
 
     update_resultado_sql = """
@@ -1164,6 +1189,9 @@ async def processar_comando_agente_rdo(
                     "payload_comando": row[8],
                     "status": row[9],
                     "requer_aprovacao": row[10],
+                    "telegram_chat_id": row[11],
+                    "telegram_user_id": row[12],
+                    "telegram_message_id": row[13],
                 }
 
                 pendencias = listar_pendencias_rdo(conn, comando["obra_codigo"])
@@ -1213,6 +1241,13 @@ async def processar_comando_agente_rdo(
         "tipo_resultado": concluido_row[3].get("tipo_resultado"),
         "agente_destino": "AGENTE_RDO",
         "agente_processador": "AGENTE_002_GERADOR_RDO",
+        "telegram_chat_id": comando["telegram_chat_id"],
+        "telegram_user_id": comando["telegram_user_id"],
+        "telegram_message_id": comando["telegram_message_id"],
+        "mensagem_resposta_executiva": montar_mensagem_resposta_executiva_rdo(
+            comando["obra_codigo"],
+            concluido_row[3].get("tipo_resultado"),
+        ),
         "acoes_externas_executadas": False,
         "message": "Comando AGENTE_RDO processado sem ações externas.",
     }
