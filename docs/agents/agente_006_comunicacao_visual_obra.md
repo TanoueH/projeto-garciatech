@@ -8,6 +8,10 @@ Alias funcional: Agente de Placas de Aviso / Comunicação Visual de Obra.
 
 O Agente 006 é o agente lógico responsável por preparar rascunhos textuais e especificações operacionais preliminares de placas de aviso para obra.
 
+O Agente 006 deve usar como referência visual os modelos fornecidos pelo Eng. Renato para placas da Obra-Caio/SUM, mantendo padrão de cor, composição, hierarquia visual, contraste e estrutura de cabeçalho/corpo, sem gerar PDF ou impressão automática sem aprovação.
+
+A referência visual base está documentada em `docs/reference/placas/README.md`. Ela registra o padrão observado: fundo azul-petróleo, cabeçalho com ícone triangular amarelo de atenção, título grande em branco, separador vertical, marca SUM à direita, corpo branco central, pictograma grande em círculo azul, texto principal grande/negrito e linguagem curta para leitura rápida em obra. A marca SUM é tratada apenas como referência visual do modelo; nenhum arquivo vetorial de logo deve ser usado neste MVP.
+
 ---
 
 ## 2. Papel na arquitetura
@@ -39,6 +43,7 @@ O Agente 006 deve:
 * sugerir mensagem secundária;
 * sugerir tipo de placa;
 * sugerir formato;
+* sugerir campos preliminares de layout conforme referência Obra-Caio/SUM;
 * sugerir local de instalação, quando informado ou inferível pela mensagem;
 * registrar que o conteúdo é rascunho não oficial;
 * indicar campos que exigem confirmação;
@@ -84,10 +89,18 @@ O resultado salvo em `comandos_executivos.resultado` deve conter:
 * `obra_codigo`;
 * `tipo_comando`;
 * `titulo`;
+* `titulo_cabecalho`;
 * `mensagem_principal`;
 * `mensagem_secundaria`;
 * `tipo_placa`;
+* `tipo_icone`;
+* `cor_base`;
+* `area_pictograma`;
+* `texto_principal`;
+* `texto_secundario`;
 * `formato_sugerido`;
+* `estilo_visual_referencia`;
+* `observacao_validacao_tecnica`;
 * `local_instalacao_sugerido`;
 * `status`: `RASCUNHO_NAO_OFICIAL`;
 * `campos_a_confirmar`;

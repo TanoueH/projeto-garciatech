@@ -705,6 +705,8 @@ def montar_resultado_agente_comunicacao_obra(comando: dict[str, Any]) -> dict[st
     conteudo = entrada.get("conteudo")
     tipo_placa = inferir_tipo_placa_aviso(conteudo)
     local_instalacao = inferir_local_instalacao_placa(conteudo)
+    cor_base = "azul-petroleo"
+    estilo_visual_referencia = "docs/reference/placas/README.md"
 
     if tipo_placa == "SEGURANCA_USO_OBRIGATORIO_EPI":
         titulo = "USO OBRIGATÓRIO DE EPI"
@@ -739,6 +741,18 @@ def montar_resultado_agente_comunicacao_obra(comando: dict[str, Any]) -> dict[st
         )
         formato_sugerido = "A3 vertical ou A4 vertical, conforme distância de leitura"
 
+    tipo_icone = "triangulo_amarelo_atencao"
+    area_pictograma = {
+        "posicao": "corpo branco central",
+        "composicao": "pictograma grande em círculo azul",
+        "status": "pictograma_preliminar_a_definir",
+    }
+    observacao_validacao_tecnica = (
+        "Rascunho não oficial baseado na referência visual Obra-Caio/SUM. "
+        "Validar texto, pictograma, local, dimensões e requisitos aplicáveis "
+        "com o responsável técnico/segurança do trabalho antes de uso oficial."
+    )
+
     campos_a_confirmar = [
         "texto final autorizado",
         "responsavel_tecnico_ou_seguranca_do_trabalho",
@@ -759,10 +773,18 @@ def montar_resultado_agente_comunicacao_obra(comando: dict[str, Any]) -> dict[st
         "obra_codigo": comando["obra_codigo"],
         "tipo_comando": comando["tipo_comando"],
         "titulo": titulo,
+        "titulo_cabecalho": titulo,
         "mensagem_principal": mensagem_principal,
         "mensagem_secundaria": mensagem_secundaria,
         "tipo_placa": tipo_placa,
+        "tipo_icone": tipo_icone,
+        "cor_base": cor_base,
+        "area_pictograma": area_pictograma,
+        "texto_principal": mensagem_principal,
+        "texto_secundario": mensagem_secundaria,
         "formato_sugerido": formato_sugerido,
+        "estilo_visual_referencia": estilo_visual_referencia,
+        "observacao_validacao_tecnica": observacao_validacao_tecnica,
         "local_instalacao_sugerido": local_instalacao,
         "status": "RASCUNHO_NAO_OFICIAL",
         "campos_a_confirmar": campos_a_confirmar,
