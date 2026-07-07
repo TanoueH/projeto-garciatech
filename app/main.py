@@ -147,6 +147,8 @@ def avaliar_autorizacao_telegram(payload: TelegramEntradaPayload) -> tuple[bool,
 
 def classificar_intencao_executiva(conteudo: Optional[str]) -> dict[str, Any]:
     texto = (conteudo or "").lower()
+    termos_rdo = ["rdo", "diário de obra", "diario de obra", "diário", "diario", "relatório diário", "relatorio diario"]
+    menciona_rdo = has_any_term(texto, termos_rdo)
 
     if has_any_term(texto, ["confirmar", "confirmo", "aprovado", "aprovar"]):
         return {
@@ -181,7 +183,40 @@ def classificar_intencao_executiva(conteudo: Optional[str]) -> dict[str, Any]:
             "justificativa": "Solicitação de impressão exige aprovação e não executa impressão real nesta etapa.",
         }
 
-    if has_any_term(
+    if menciona_rdo and has_any_term(
+        texto,
+        [
+            "gerar pdf",
+            "gerar o pdf",
+            "gere o pdf",
+            "emita o pdf",
+            "emitir o pdf",
+            "pdf do rdo",
+            "pdf do diário",
+            "pdf do diario",
+            "rdo em pdf",
+            "diário em pdf",
+            "diario em pdf",
+            "feche o rdo em pdf",
+            "fechar o rdo em pdf",
+            "exportar rdo",
+            "exporte o rdo",
+            "faça o pdf",
+            "faca o pdf",
+            "cópia em pdf",
+            "copia em pdf",
+        ],
+    ):
+        return {
+            "intencao": "GERAR_PDF_RDO",
+            "agente_destino": "AGENTE_RDO",
+            "tipo_comando": "GERAR_PDF_RDO",
+            "requer_aprovacao": True,
+            "confianca": 0.86,
+            "justificativa": "Solicitação registrada apenas como comando; nenhum PDF real é gerado nesta etapa.",
+        }
+
+    if menciona_rdo and has_any_term(
         texto,
         [
             "atualizar rdo",
@@ -193,10 +228,14 @@ def classificar_intencao_executiva(conteudo: Optional[str]) -> dict[str, Any]:
             "atualizar o rdo",
             "atualize rdo",
             "atualiza rdo",
+            "altere o rdo",
+            "corrija o rdo",
             "lançar rdo",
             "lancar rdo",
             "registrar rdo",
-            "fechar rdo",
+            "registre oficialmente",
+            "registrar oficialmente",
+            "rdo oficial",
         ],
     ):
         return {
@@ -208,32 +247,30 @@ def classificar_intencao_executiva(conteudo: Optional[str]) -> dict[str, Any]:
             "justificativa": "Alteração de RDO é ação sensível e não altera RDO oficial nesta etapa.",
         }
 
-    if has_any_term(
+    if menciona_rdo and has_any_term(
         texto,
         [
-            "gerar pdf",
-            "pdf do rdo",
-            "rdo em pdf",
-            "exportar rdo",
-            "gere o pdf",
-            "gerar o pdf",
-            "faça o pdf",
-            "faca o pdf",
-            "cópia em pdf",
-            "copia em pdf",
-            "exporte o rdo",
+            "prepare",
+            "preparar",
+            "monte",
+            "montar",
+            "crie",
+            "criar",
+            "elabore",
+            "elaborar",
+            "rascunho",
         ],
     ):
         return {
-            "intencao": "GERAR_PDF_RDO",
+            "intencao": "PREPARAR_RDO",
             "agente_destino": "AGENTE_RDO",
-            "tipo_comando": "GERAR_PDF_RDO",
+            "tipo_comando": "PREPARAR_RDO",
             "requer_aprovacao": False,
-            "confianca": 0.86,
-            "justificativa": "Solicitação registrada apenas como comando; nenhum PDF real é gerado nesta etapa.",
+            "confianca": 0.88,
+            "justificativa": "Mensagem indica preparação de rascunho de RDO sem oficialização.",
         }
 
-    if has_any_term(texto, ["rdo", "diário", "diario", "relatório diário", "relatorio diario"]):
+    if menciona_rdo:
         return {
             "intencao": "CONSULTAR_RDO",
             "agente_destino": "AGENTE_RDO",
@@ -409,11 +446,7 @@ def montar_resultado_agente_rdo(
     entrada = payload_comando.get("entrada", {})
     conteudo = entrada.get("conteudo")
 
-    tipo_resultado = (
-        "RASCUNHO_RDO"
-        if tipo_comando in {"ATUALIZAR_RDO", "GERAR_PDF_RDO"}
-        else "RESUMO_EXECUTIVO_RDO"
-    )
+    tipo_resultado = "RASCUNHO_RDO" if tipo_comando == "PREPARAR_RDO" else "RESUMO_EXECUTIVO_RDO"
 
     return {
         "tipo_resultado": tipo_resultado,
