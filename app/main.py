@@ -102,6 +102,71 @@ def has_any_term(texto: str, termos: list[str]) -> bool:
     return any(termo in texto for termo in termos)
 
 
+def parse_instrucao_aprovacao_comando(conteudo: Optional[str]) -> Optional[dict[str, Any]]:
+    texto = (conteudo or "").strip().lower()
+    if not texto:
+        return None
+
+    match = re.search(
+        r"\b(aprovar|aprova|autorizar|confirmar|cancelar|cancela|rejeitar)\s+comando\s+([0-9a-fA-F-]+)\b",
+        texto,
+    )
+    if not match:
+        return None
+
+    verbo = match.group(1)
+    identificador = match.group(2)
+    acao = "CANCELAR" if verbo in {"cancelar", "cancela", "rejeitar"} else "APROVAR"
+    tipo_identificador = "id_comando" if "-" in identificador else "id"
+
+    if tipo_identificador == "id":
+        try:
+            comando_id = int(identificador)
+        except ValueError:
+            return None
+        return {
+            "acao": acao,
+            "comando_id": comando_id,
+            "id_comando": None,
+            "identificador": str(comando_id),
+            "tipo_identificador": tipo_identificador,
+        }
+
+    try:
+        id_comando = str(uuid.UUID(identificador))
+    except ValueError:
+        return None
+
+    return {
+        "acao": acao,
+        "comando_id": None,
+        "id_comando": id_comando,
+        "identificador": id_comando,
+        "tipo_identificador": tipo_identificador,
+    }
+
+
+def classificar_instrucao_aprovacao(instrucao: dict[str, Any]) -> dict[str, Any]:
+    if instrucao["acao"] == "APROVAR":
+        return {
+            "intencao": "APROVAR_COMANDO_EXECUTIVO",
+            "agente_destino": "AGENTE_007_ORQUESTRADOR_EXECUTIVO",
+            "tipo_comando": "APROVAR_COMANDO_EXECUTIVO",
+            "requer_aprovacao": False,
+            "confianca": 0.98,
+            "justificativa": "Mensagem solicita aprovação auditável de comando executivo existente.",
+        }
+
+    return {
+        "intencao": "CANCELAR_COMANDO_EXECUTIVO",
+        "agente_destino": "AGENTE_007_ORQUESTRADOR_EXECUTIVO",
+        "tipo_comando": "CANCELAR_COMANDO_EXECUTIVO",
+        "requer_aprovacao": False,
+        "confianca": 0.98,
+        "justificativa": "Mensagem solicita cancelamento auditável de comando executivo existente.",
+    }
+
+
 def parse_env_allowlist(*values: Optional[str]) -> set[str]:
     allowed: set[str] = set()
     for value in values:
@@ -769,7 +834,12 @@ async def receber_entrada_telegram(
 
     correlation_id = parse_correlation_id(x_correlation_id)
     usuario_autorizado, motivo_autorizacao = avaliar_autorizacao_telegram(payload)
-    classificacao = classificar_intencao_executiva(payload.conteudo)
+    instrucao_aprovacao = parse_instrucao_aprovacao_comando(payload.conteudo)
+    classificacao = (
+        classificar_instrucao_aprovacao(instrucao_aprovacao)
+        if instrucao_aprovacao
+        else classificar_intencao_executiva(payload.conteudo)
+    )
     if not usuario_autorizado:
         classificacao = {
             "intencao": "USUARIO_NAO_AUTORIZADO",
@@ -801,6 +871,8 @@ async def receber_entrada_telegram(
         "intencao": classificacao["intencao"],
         "agente_destino": classificacao["agente_destino"],
     }
+    if instrucao_aprovacao:
+        normalized["instrucao_aprovacao"] = instrucao_aprovacao
 
     payload_hash = stable_hash(raw_payload)
     telegram_idempotency_parts = [
@@ -947,6 +1019,56 @@ async def receber_entrada_telegram(
       AND status_processamento <> 'COMANDO_GERADO';
     """
 
+    update_evento_aprovacao_sql = """
+    UPDATE eventos_telegram
+    SET status_processamento = 'COMANDO_GERADO',
+        atualizado_em = NOW()
+    WHERE id = %(evento_telegram_id)s
+      AND status_processamento <> 'COMANDO_GERADO';
+    """
+
+    select_comando_alvo_sql = """
+    SELECT id, id_comando, status, tipo_comando, agente_destino
+    FROM comandos_executivos
+    WHERE (
+            %(comando_id)s::bigint IS NOT NULL
+            AND id = %(comando_id)s::bigint
+        )
+       OR (
+            %(id_comando)s::uuid IS NOT NULL
+            AND id_comando = %(id_comando)s::uuid
+        )
+    ORDER BY id
+    LIMIT 1
+    FOR UPDATE;
+    """
+
+    update_aprovar_comando_sql = """
+    UPDATE comandos_executivos
+    SET status = 'APROVADO',
+        aprovado_por = %(aprovado_por)s,
+        aprovado_em = NOW(),
+        resultado = %(resultado)s,
+        evidencias = COALESCE(evidencias, '[]'::jsonb) || %(evidencia)s::jsonb,
+        mensagem_erro = NULL,
+        atualizado_em = NOW()
+    WHERE id = %(id)s
+      AND status = 'AGUARDANDO_APROVACAO'
+    RETURNING id, id_comando, status, tipo_comando, agente_destino;
+    """
+
+    update_cancelar_comando_sql = """
+    UPDATE comandos_executivos
+    SET status = 'CANCELADO',
+        resultado = %(resultado)s,
+        evidencias = COALESCE(evidencias, '[]'::jsonb) || %(evidencia)s::jsonb,
+        mensagem_erro = NULL,
+        atualizado_em = NOW()
+    WHERE id = %(id)s
+      AND status = 'AGUARDANDO_APROVACAO'
+    RETURNING id, id_comando, status, tipo_comando, agente_destino;
+    """
+
     evento_row = None
     comando_row = None
     evento_duplicado = False
@@ -997,6 +1119,189 @@ async def receber_entrada_telegram(
                     raise RuntimeError("Evento Telegram não foi registrado nem recuperado.")
 
                 evento_id = evento_row[0]
+
+                if instrucao_aprovacao and usuario_autorizado:
+                    cur.execute(
+                        select_comando_alvo_sql,
+                        {
+                            "comando_id": instrucao_aprovacao["comando_id"],
+                            "id_comando": instrucao_aprovacao["id_comando"],
+                        },
+                    )
+                    comando_alvo_row = cur.fetchone()
+
+                    if comando_alvo_row is None:
+                        mensagem_resposta_executiva = (
+                            f"Comando {instrucao_aprovacao['identificador']} não encontrado. "
+                            "Nenhuma ação externa foi executada."
+                        )
+                        cur.execute(
+                            update_evento_aprovacao_sql,
+                            {"evento_telegram_id": evento_id},
+                        )
+                        conn.commit()
+                        return {
+                            "ok": True,
+                            "evento_telegram_id": evento_row[0],
+                            "status_recebimento": evento_row[1],
+                            "status_evento": "COMANDO_GERADO",
+                            "evento_duplicado": evento_duplicado,
+                            "comando_executivo_id": None,
+                            "id_comando": None,
+                            "status_comando": None,
+                            "tenant_id": normalized["tenant_id"],
+                            "obra_codigo": normalized["obra_codigo"],
+                            "correlation_id": correlation_id,
+                            "idempotency_key": idempotency_key,
+                            "usuario_autorizado": usuario_autorizado,
+                            "motivo_autorizacao": motivo_autorizacao,
+                            "intencao": classificacao["intencao"],
+                            "confianca": classificacao["confianca"],
+                            "agente_origem": "AGENTE_007_ORQUESTRADOR_EXECUTIVO",
+                            "agente_destino": classificacao["agente_destino"],
+                            "tipo_comando": classificacao["tipo_comando"],
+                            "requer_aprovacao": classificacao["requer_aprovacao"],
+                            "telegram_chat_id": normalized["chat_id"],
+                            "telegram_user_id": normalized["telegram_user_id"],
+                            "telegram_message_id": normalized["telegram_message_id"],
+                            "mensagem_resposta_executiva": mensagem_resposta_executiva,
+                            "acoes_externas_executadas": False,
+                            "next_action": "NENHUMA_ACAO_EXTERNA_EXECUTADA",
+                            "message": mensagem_resposta_executiva,
+                        }
+
+                    status_atual = comando_alvo_row[2]
+                    if status_atual != "AGUARDANDO_APROVACAO":
+                        mensagem_resposta_executiva = (
+                            f"Comando {comando_alvo_row[0]} está com status {status_atual}. "
+                            "Nenhuma alteração foi feita."
+                        )
+                        cur.execute(
+                            update_evento_aprovacao_sql,
+                            {"evento_telegram_id": evento_id},
+                        )
+                        conn.commit()
+                        return {
+                            "ok": True,
+                            "evento_telegram_id": evento_row[0],
+                            "status_recebimento": evento_row[1],
+                            "status_evento": "COMANDO_GERADO",
+                            "evento_duplicado": evento_duplicado,
+                            "comando_executivo_id": comando_alvo_row[0],
+                            "id_comando": str(comando_alvo_row[1]),
+                            "status_comando": status_atual,
+                            "tenant_id": normalized["tenant_id"],
+                            "obra_codigo": normalized["obra_codigo"],
+                            "correlation_id": correlation_id,
+                            "idempotency_key": idempotency_key,
+                            "usuario_autorizado": usuario_autorizado,
+                            "motivo_autorizacao": motivo_autorizacao,
+                            "intencao": classificacao["intencao"],
+                            "confianca": classificacao["confianca"],
+                            "agente_origem": "AGENTE_007_ORQUESTRADOR_EXECUTIVO",
+                            "agente_destino": comando_alvo_row[4],
+                            "tipo_comando": comando_alvo_row[3],
+                            "requer_aprovacao": False,
+                            "telegram_chat_id": normalized["chat_id"],
+                            "telegram_user_id": normalized["telegram_user_id"],
+                            "telegram_message_id": normalized["telegram_message_id"],
+                            "mensagem_resposta_executiva": mensagem_resposta_executiva,
+                            "acoes_externas_executadas": False,
+                            "next_action": "NENHUMA_ACAO_EXTERNA_EXECUTADA",
+                            "message": mensagem_resposta_executiva,
+                        }
+
+                    auditoria = {
+                        "tipo_evento": "APROVACAO_EXECUTIVA_TELEGRAM"
+                        if instrucao_aprovacao["acao"] == "APROVAR"
+                        else "CANCELAMENTO_EXECUTIVO_TELEGRAM",
+                        "acao": instrucao_aprovacao["acao"],
+                        "agente": "AGENTE_007_ORQUESTRADOR_EXECUTIVO",
+                        "evento_telegram_id": evento_id,
+                        "telegram_user_id": normalized["telegram_user_id"],
+                        "telegram_chat_id": normalized["chat_id"],
+                        "telegram_message_id": normalized["telegram_message_id"],
+                        "correlation_id": correlation_id,
+                        "registrado_em": datetime.now(timezone.utc).isoformat(),
+                        "acoes_externas_executadas": False,
+                    }
+                    resultado_aprovacao = {
+                        "tipo_resultado": "COMANDO_EXECUTIVO_APROVADO"
+                        if instrucao_aprovacao["acao"] == "APROVAR"
+                        else "COMANDO_EXECUTIVO_CANCELADO",
+                        "auditoria": auditoria,
+                        "controles_operacionais": {
+                            "executou_acao_externa": False,
+                            "gerou_pdf_real": False,
+                            "imprimiu": False,
+                            "alterou_rdo_oficial": False,
+                            "executou_rpa": False,
+                            "conectou_openclaw": False,
+                            "enviou_mensagem_terceiros": False,
+                        },
+                    }
+                    update_sql = (
+                        update_aprovar_comando_sql
+                        if instrucao_aprovacao["acao"] == "APROVAR"
+                        else update_cancelar_comando_sql
+                    )
+                    cur.execute(
+                        update_sql,
+                        {
+                            "id": comando_alvo_row[0],
+                            "aprovado_por": normalized["telegram_user_id"]
+                            or normalized["remetente_identificador"]
+                            or normalized["chat_id"],
+                            "resultado": Json(resultado_aprovacao),
+                            "evidencia": Json([auditoria]),
+                        },
+                    )
+                    comando_atualizado_row = cur.fetchone()
+                    if comando_atualizado_row is None:
+                        raise RuntimeError("Comando alvo não foi atualizado.")
+
+                    cur.execute(
+                        update_evento_aprovacao_sql,
+                        {"evento_telegram_id": evento_id},
+                    )
+                    mensagem_resposta_executiva = (
+                        f"Comando {comando_atualizado_row[0]} aprovado. "
+                        "Nenhuma ação externa foi executada."
+                        if instrucao_aprovacao["acao"] == "APROVAR"
+                        else f"Comando {comando_atualizado_row[0]} cancelado. "
+                        "Nenhuma ação externa foi executada."
+                    )
+                    conn.commit()
+                    return {
+                        "ok": True,
+                        "evento_telegram_id": evento_row[0],
+                        "status_recebimento": evento_row[1],
+                        "status_evento": "COMANDO_GERADO",
+                        "evento_duplicado": evento_duplicado,
+                        "comando_executivo_id": comando_atualizado_row[0],
+                        "id_comando": str(comando_atualizado_row[1]),
+                        "status_comando": comando_atualizado_row[2],
+                        "tenant_id": normalized["tenant_id"],
+                        "obra_codigo": normalized["obra_codigo"],
+                        "correlation_id": correlation_id,
+                        "idempotency_key": idempotency_key,
+                        "usuario_autorizado": usuario_autorizado,
+                        "motivo_autorizacao": motivo_autorizacao,
+                        "intencao": classificacao["intencao"],
+                        "confianca": classificacao["confianca"],
+                        "agente_origem": "AGENTE_007_ORQUESTRADOR_EXECUTIVO",
+                        "agente_destino": comando_atualizado_row[4],
+                        "tipo_comando": comando_atualizado_row[3],
+                        "requer_aprovacao": False,
+                        "telegram_chat_id": normalized["chat_id"],
+                        "telegram_user_id": normalized["telegram_user_id"],
+                        "telegram_message_id": normalized["telegram_message_id"],
+                        "mensagem_resposta_executiva": mensagem_resposta_executiva,
+                        "acoes_externas_executadas": False,
+                        "next_action": "COMANDO_ATUALIZADO_SEM_EXECUCAO_EXTERNA",
+                        "message": mensagem_resposta_executiva,
+                    }
+
                 payload_comando = {
                     "modo": "curl_local_sem_integracoes_externas",
                     "proibicoes": [
@@ -1069,6 +1374,13 @@ async def receber_entrada_telegram(
             },
         )
 
+    mensagem_resposta_executiva = None
+    if not usuario_autorizado:
+        mensagem_resposta_executiva = (
+            "Usuário não autorizado para comandos executivos. "
+            "Solicitação registrada para auditoria; nenhum comando foi alterado."
+        )
+
     return {
         "ok": True,
         "evento_telegram_id": evento_row[0],
@@ -1090,6 +1402,11 @@ async def receber_entrada_telegram(
         "agente_destino": classificacao["agente_destino"],
         "tipo_comando": classificacao["tipo_comando"],
         "requer_aprovacao": classificacao["requer_aprovacao"],
+        "telegram_chat_id": normalized["chat_id"],
+        "telegram_user_id": normalized["telegram_user_id"],
+        "telegram_message_id": normalized["telegram_message_id"],
+        "mensagem_resposta_executiva": mensagem_resposta_executiva,
+        "acoes_externas_executadas": False,
         "next_action": "COMANDO_AUDITAVEL_REGISTRADO_SEM_EXECUCAO_EXTERNA",
         "message": "Entrada Telegram registrada e classificada sem integrações externas.",
     }
