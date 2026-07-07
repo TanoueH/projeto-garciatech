@@ -82,3 +82,49 @@ Status envolvidos no MVP 0.4D:
 * `CANCELADO`: decisão humana registrada; encerra o comando sem execução.
 
 Restrição explícita: `APROVADO` é apenas um estado auditável neste MVP. A aprovação não executa ação externa, não gera PDF, não altera `rdo_obra`, não imprime, não executa RPA, não conecta OpenClaw e não envia mensagem para terceiros.
+
+---
+
+## 5. Resposta real no Telegram no MVP 0.4E
+
+O MVP 0.4E fecha o ciclo operacional de aprovação/cancelamento pelo Telegram:
+
+```text
+mensagem Telegram
+    ↓
+getUpdates
+    ↓
+scripts/telegram/processar_aprovacao_pendente_e_responder.py
+    ↓
+/telegram/entrada
+    ↓
+comando executivo atualizado e auditado
+    ↓
+sendMessage para o mesmo chat_id de origem
+```
+
+O script `scripts/telegram/processar_aprovacao_pendente_e_responder.py` é o courier Telegram deste fluxo. Ele lê `TELEGRAM_BOT_TOKEN` apenas do ambiente, consulta `getUpdates`, filtra somente mensagens de texto relacionadas a aprovação ou cancelamento de comando executivo e encaminha essas mensagens para `/telegram/entrada`.
+
+Frases aceitas no MVP 0.4E:
+
+* `aprovar comando N`
+* `aprova comando N`
+* `autorizar comando N`
+* `confirmar comando N`
+* `cancelar comando N`
+* `cancela comando N`
+* `rejeitar comando N`
+
+Mensagens não relacionadas são ignoradas sem erro. O offset persistente local próprio do fluxo de aprovação é:
+
+```text
+.runtime/telegram/agente_007_aprovacao_offset.json
+```
+
+O script aceita `--reset-offset`, `--offset`, `--limit` e `--dry-run`. O `--dry-run` processa a mensagem na API Core, mas não envia `sendMessage`.
+
+Quando a API Core retorna `mensagem_resposta_executiva` e `telegram_chat_id`, o script envia a resposta real pelo Telegram somente para esse `telegram_chat_id`. O `chat_id` nunca é aceito por argumento externo, não é decidido pelo script e não pode ser arbitrado na linha de comando.
+
+O resumo impresso pelo script é seguro e não expõe token nem conteúdo completo da mensagem. Ele deve conter apenas dados operacionais resumidos, como `update_id`, `intencao`, `comando_executivo_id`, `status_comando`, `telegram_chat_id` mascarado, `enviado` e `dry_run`.
+
+Restrição explícita do MVP 0.4E: a resposta real no Telegram confirma a decisão auditada, mas `APROVADO` ainda não executa ação externa. Não gera PDF, não altera `rdo_obra`, não imprime, não executa RPA, não conecta OpenClaw e não oficializa RDO.

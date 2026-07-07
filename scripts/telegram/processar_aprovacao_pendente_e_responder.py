@@ -27,7 +27,7 @@ from capturar_updates_telegram import (
 
 
 DEFAULT_API_CORE_URL = "http://127.0.0.1:8000/telegram/entrada"
-DEFAULT_OFFSET_FILE = Path(".runtime/telegram/agente_007_aprovacoes_offset.json")
+DEFAULT_OFFSET_FILE = Path(".runtime/telegram/agente_007_aprovacao_offset.json")
 
 
 def parse_args() -> argparse.Namespace:
@@ -101,8 +101,15 @@ def imprimir_evento(evento: str, payload: dict[str, Any]) -> None:
     print(json.dumps({"evento": evento, **payload}, ensure_ascii=False))
 
 
-def resumo_api(status_code: int, body: dict[str, Any], enviado: bool, dry_run: bool) -> dict[str, Any]:
+def resumo_api(
+    update_id: Any,
+    status_code: int,
+    body: dict[str, Any],
+    enviado: bool,
+    dry_run: bool,
+) -> dict[str, Any]:
     return {
+        "update_id": update_id,
         "http_status": status_code,
         "ok": body.get("ok"),
         "status_evento": body.get("status_evento"),
@@ -220,7 +227,13 @@ def main() -> int:
                     )
                     imprimir_evento(
                         "aprovacao_processada",
-                        resumo_api(status_code, body, enviado=False, dry_run=args.dry_run),
+                        resumo_api(
+                            payload.get("telegram_update_id"),
+                            status_code,
+                            body,
+                            enviado=False,
+                            dry_run=args.dry_run,
+                        ),
                     )
                     continue
                 enviado = True
@@ -230,7 +243,13 @@ def main() -> int:
 
         imprimir_evento(
             "aprovacao_processada",
-            resumo_api(status_code, body, enviado=enviado, dry_run=args.dry_run),
+            resumo_api(
+                payload.get("telegram_update_id"),
+                status_code,
+                body,
+                enviado=enviado,
+                dry_run=args.dry_run,
+            ),
         )
 
     max_update_id = maior_update_id(updates)
