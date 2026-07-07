@@ -49,7 +49,29 @@ No MVP 0.4B o Agente 007 apenas registra comandos auditáveis em `comandos_execu
 
 ---
 
-## 4. Aprovação e cancelamento no MVP 0.4D
+## 4. Matriz de intenções de placas no MVP 0.5A
+
+O classificador determinístico de `/telegram/entrada` deve reconhecer pedidos de comunicação visual de obra e encaminhar ao `AGENTE_006_COMUNICACAO_VISUAL_OBRA`.
+
+| Intenção | Exemplos | Agente destino | Requer aprovação | Status inicial |
+| --- | --- | --- | --- | --- |
+| `PREPARAR_PLACA_AVISO` | "prepare uma placa", "gerar placa de aviso", "crie uma placa para a obra", "placa de uso obrigatório de EPI", "aviso para o canteiro", "comunicado para a obra", "sinalização da obra", "placa de segurança" | `AGENTE_006_COMUNICACAO_VISUAL_OBRA` | `false` | `PENDENTE` |
+| `GERAR_PDF_PLACA_AVISO` | "gere o PDF da placa", "emita o PDF da placa", "PDF do aviso" | `AGENTE_006_COMUNICACAO_VISUAL_OBRA` | `true` | `AGUARDANDO_APROVACAO` |
+| `IMPRIMIR_PLACA_AVISO` | "imprima a placa", "mande imprimir a placa", "solicite impressão da placa" | `AGENTE_006_COMUNICACAO_VISUAL_OBRA` | `true` | `AGUARDANDO_APROVACAO` |
+| `INSTALAR_PLACA_AVISO` | "instale a placa", "fixe a placa", "coloque a placa no canteiro" | `AGENTE_006_COMUNICACAO_VISUAL_OBRA` | `true` | `AGUARDANDO_APROVACAO` |
+
+Prioridade obrigatória:
+
+1. confirmações e cancelamentos continuam antes das intenções de placas;
+2. ações sensíveis de placa (`GERAR_PDF_PLACA_AVISO`, `IMPRIMIR_PLACA_AVISO`, `INSTALAR_PLACA_AVISO`) vêm antes de preparação;
+3. intenções de placas vêm antes da impressão genérica;
+4. preparação de placa gera apenas rascunho textual não oficial.
+
+No MVP 0.5A o Agente 007 apenas registra comandos auditáveis em `comandos_executivos`. O Agente 006 prepara rascunho textual e especificação operacional preliminar. Nenhum PDF real é gerado, nenhuma impressão é executada, nenhuma instalação é feita, nenhum RPA é executado, OpenClaw não é conectado e nenhuma mensagem é enviada a terceiros. O conteúdo não afirma conformidade normativa final e deve ser validado pelo responsável técnico/segurança do trabalho antes de uso oficial.
+
+---
+
+## 5. Aprovação e cancelamento no MVP 0.4D
 
 O endpoint `/telegram/entrada` também reconhece comandos executivos curtos de aprovação ou cancelamento enviados pelo Telegram:
 
@@ -85,7 +107,7 @@ Restrição explícita: `APROVADO` é apenas um estado auditável neste MVP. A a
 
 ---
 
-## 5. Resposta real no Telegram no MVP 0.4E
+## 6. Resposta real no Telegram no MVP 0.4E
 
 O MVP 0.4E fecha o ciclo operacional de aprovação/cancelamento pelo Telegram:
 

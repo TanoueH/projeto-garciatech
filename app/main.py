@@ -71,6 +71,10 @@ class ProcessarComandoRDORequest(BaseModel):
     id_comando: Optional[str] = None
 
 
+class ProcessarComandoComunicacaoObraRequest(BaseModel):
+    id_comando: Optional[str] = None
+
+
 def get_db_connection():
     if not DATABASE_URL:
         raise RuntimeError("DATABASE_URL não definida.")
@@ -214,6 +218,17 @@ def classificar_intencao_executiva(conteudo: Optional[str]) -> dict[str, Any]:
     texto = (conteudo or "").lower()
     termos_rdo = ["rdo", "diário de obra", "diario de obra", "diário", "diario", "relatório diário", "relatorio diario"]
     menciona_rdo = has_any_term(texto, termos_rdo)
+    termos_placa = [
+        "placa",
+        "placa de aviso",
+        "aviso para o canteiro",
+        "comunicado para a obra",
+        "sinalização da obra",
+        "sinalizacao da obra",
+        "placa de segurança",
+        "placa de seguranca",
+    ]
+    menciona_placa = has_any_term(texto, termos_placa)
 
     if has_any_term(texto, ["confirmar", "confirmo", "aprovado", "aprovar"]):
         return {
@@ -233,6 +248,84 @@ def classificar_intencao_executiva(conteudo: Optional[str]) -> dict[str, Any]:
             "requer_aprovacao": False,
             "confianca": 0.90,
             "justificativa": "Mensagem indica cancelamento ou rejeição executiva.",
+        }
+
+    if menciona_placa and has_any_term(
+        texto,
+        [
+            "gerar pdf",
+            "gerar o pdf",
+            "gere o pdf",
+            "pdf da placa",
+            "pdf do aviso",
+            "emitir pdf",
+            "emita o pdf",
+        ],
+    ):
+        return {
+            "intencao": "GERAR_PDF_PLACA_AVISO",
+            "agente_destino": "AGENTE_006_COMUNICACAO_VISUAL_OBRA",
+            "tipo_comando": "GERAR_PDF_PLACA_AVISO",
+            "requer_aprovacao": True,
+            "confianca": 0.88,
+            "justificativa": "Geração de PDF de placa é ação sensível e exige aprovação; nenhum PDF real é gerado nesta etapa.",
+        }
+
+    if menciona_placa and has_any_term(
+        texto,
+        ["imprimir", "impressão", "impressao", "imprima", "mande imprimir", "solicite impressão", "solicite impressao"],
+    ):
+        return {
+            "intencao": "IMPRIMIR_PLACA_AVISO",
+            "agente_destino": "AGENTE_006_COMUNICACAO_VISUAL_OBRA",
+            "tipo_comando": "IMPRIMIR_PLACA_AVISO",
+            "requer_aprovacao": True,
+            "confianca": 0.88,
+            "justificativa": "Impressão de placa é ação sensível e exige aprovação; nenhuma impressão real é executada nesta etapa.",
+        }
+
+    if menciona_placa and has_any_term(
+        texto,
+        ["instalar", "instale", "instala", "fixar", "fixe", "colocar a placa", "coloque a placa"],
+    ):
+        return {
+            "intencao": "INSTALAR_PLACA_AVISO",
+            "agente_destino": "AGENTE_006_COMUNICACAO_VISUAL_OBRA",
+            "tipo_comando": "INSTALAR_PLACA_AVISO",
+            "requer_aprovacao": True,
+            "confianca": 0.88,
+            "justificativa": "Instalação de placa é ação sensível e exige aprovação; nenhuma instalação é executada nesta etapa.",
+        }
+
+    if menciona_placa and has_any_term(
+        texto,
+        [
+            "prepare",
+            "preparar",
+            "gerar placa",
+            "gerar placa de aviso",
+            "crie",
+            "criar",
+            "monte",
+            "montar",
+            "elabore",
+            "elaborar",
+            "rascunho",
+            "uso obrigatório de epi",
+            "uso obrigatorio de epi",
+            "aviso",
+            "comunicado",
+            "sinalização",
+            "sinalizacao",
+        ],
+    ):
+        return {
+            "intencao": "PREPARAR_PLACA_AVISO",
+            "agente_destino": "AGENTE_006_COMUNICACAO_VISUAL_OBRA",
+            "tipo_comando": "PREPARAR_PLACA_AVISO",
+            "requer_aprovacao": False,
+            "confianca": 0.87,
+            "justificativa": "Mensagem indica preparação de rascunho textual de placa de aviso sem PDF, impressão ou instalação.",
         }
 
     if has_any_term(
@@ -571,6 +664,135 @@ def montar_mensagem_resposta_executiva_rdo(
         return (
             f"Resumo executivo de RDO preparado para {obra_codigo}. "
             "Nenhuma ação externa foi executada."
+        )
+
+    return None
+
+
+def inferir_tipo_placa_aviso(conteudo: Optional[str]) -> str:
+    texto = (conteudo or "").lower()
+
+    if has_any_term(texto, ["epi", "capacete", "bota", "luva", "óculos", "oculos"]):
+        return "SEGURANCA_USO_OBRIGATORIO_EPI"
+    if has_any_term(texto, ["canteiro", "obra"]):
+        return "AVISO_CANTEIRO_OBRA"
+    if has_any_term(texto, ["comunicado", "comunicação", "comunicacao"]):
+        return "COMUNICADO_OPERACIONAL"
+
+    return "PLACA_AVISO_GERAL"
+
+
+def inferir_local_instalacao_placa(conteudo: Optional[str]) -> Optional[str]:
+    texto = (conteudo or "").lower()
+
+    if "entrada" in texto or "portaria" in texto:
+        return "Entrada/portaria da obra"
+    if "canteiro" in texto:
+        return "Canteiro de obras"
+    if "refeitório" in texto or "refeitorio" in texto:
+        return "Refeitório"
+    if "almoxarifado" in texto:
+        return "Almoxarifado"
+    if "escada" in texto or "acesso" in texto:
+        return "Área de acesso/circulação"
+
+    return None
+
+
+def montar_resultado_agente_comunicacao_obra(comando: dict[str, Any]) -> dict[str, Any]:
+    payload_comando = comando["payload_comando"] or {}
+    entrada = payload_comando.get("entrada", {})
+    conteudo = entrada.get("conteudo")
+    tipo_placa = inferir_tipo_placa_aviso(conteudo)
+    local_instalacao = inferir_local_instalacao_placa(conteudo)
+
+    if tipo_placa == "SEGURANCA_USO_OBRIGATORIO_EPI":
+        titulo = "USO OBRIGATÓRIO DE EPI"
+        mensagem_principal = "O acesso à área de obra exige uso dos EPIs definidos para a atividade."
+        mensagem_secundaria = (
+            "Antes do uso oficial, validar texto, pictogramas, local de instalação "
+            "e requisitos aplicáveis com o responsável técnico/segurança do trabalho."
+        )
+        formato_sugerido = "A3 vertical, alta legibilidade, material resistente ao ambiente da obra"
+    elif tipo_placa == "AVISO_CANTEIRO_OBRA":
+        titulo = "AVISO AO CANTEIRO"
+        mensagem_principal = "Atenção às orientações operacionais e de segurança da obra."
+        mensagem_secundaria = (
+            "Conteúdo preliminar para revisão interna; validar com responsável técnico/"
+            "segurança do trabalho antes de uso oficial."
+        )
+        formato_sugerido = "A3 vertical ou A4 horizontal, conforme ponto de instalação"
+    elif tipo_placa == "COMUNICADO_OPERACIONAL":
+        titulo = "COMUNICADO DA OBRA"
+        mensagem_principal = "Comunicado operacional para equipes e visitantes da obra."
+        mensagem_secundaria = (
+            "Revisar destinatários, data de validade e responsável pela autorização "
+            "antes de qualquer divulgação oficial."
+        )
+        formato_sugerido = "A4 vertical, linguagem objetiva e identificação da obra"
+    else:
+        titulo = "PLACA DE AVISO"
+        mensagem_principal = "Aviso preliminar para comunicação visual da obra."
+        mensagem_secundaria = (
+            "Rascunho não oficial. O conteúdo deve ser validado pelo responsável "
+            "técnico/segurança do trabalho antes de uso oficial."
+        )
+        formato_sugerido = "A3 vertical ou A4 vertical, conforme distância de leitura"
+
+    campos_a_confirmar = [
+        "texto final autorizado",
+        "responsavel_tecnico_ou_seguranca_do_trabalho",
+        "local_exato_de_instalacao",
+        "dimensoes_finais",
+        "material_da_placa",
+        "necessidade_de_pictogramas",
+    ]
+    if local_instalacao is None:
+        campos_a_confirmar.append("local_instalacao")
+
+    return {
+        "tipo_resultado": "RASCUNHO_PLACA_AVISO",
+        "agente": "AGENTE_006_COMUNICACAO_VISUAL_OBRA",
+        "modo_processamento": "DETERMINISTICO_MOCK",
+        "id_comando": str(comando["id_comando"]),
+        "correlation_id": str(comando["correlation_id"]),
+        "obra_codigo": comando["obra_codigo"],
+        "tipo_comando": comando["tipo_comando"],
+        "titulo": titulo,
+        "mensagem_principal": mensagem_principal,
+        "mensagem_secundaria": mensagem_secundaria,
+        "tipo_placa": tipo_placa,
+        "formato_sugerido": formato_sugerido,
+        "local_instalacao_sugerido": local_instalacao,
+        "status": "RASCUNHO_NAO_OFICIAL",
+        "campos_a_confirmar": campos_a_confirmar,
+        "observacao_validacao": (
+            "Este conteúdo é um rascunho textual não oficial e não afirma "
+            "conformidade normativa final. Deve ser validado pelo responsável "
+            "técnico/segurança do trabalho antes de uso oficial."
+        ),
+        "controles_operacionais": {
+            "gerou_pdf_real": False,
+            "imprimiu": False,
+            "executou_rpa": False,
+            "conectou_openclaw": False,
+            "alterou_rdo_oficial": False,
+            "enviou_mensagem_terceiros": False,
+            "requer_aprovacao_para_pdf_ou_impressao": True,
+        },
+        "gerado_em": datetime.now(timezone.utc).isoformat(),
+    }
+
+
+def montar_mensagem_resposta_executiva_comunicacao_obra(
+    obra_codigo: Optional[str],
+    tipo_resultado: Optional[str],
+) -> Optional[str]:
+    if tipo_resultado == "RASCUNHO_PLACA_AVISO":
+        return (
+            f"Rascunho de placa de aviso preparado para {obra_codigo}. "
+            "Status: rascunho não oficial. Nenhum PDF, impressão, RPA ou envio externo foi executado. "
+            "Validar com responsável técnico/segurança do trabalho antes de uso oficial."
         )
 
     return None
@@ -1567,6 +1789,170 @@ async def processar_comando_agente_rdo(
         ),
         "acoes_externas_executadas": False,
         "message": "Comando AGENTE_RDO processado sem ações externas.",
+    }
+
+
+@app.post("/agentes/comunicacao-obra/processar-comando")
+async def processar_comando_agente_comunicacao_obra(
+    payload: Optional[ProcessarComandoComunicacaoObraRequest] = None,
+):
+    id_comando = payload.id_comando if payload else None
+    if id_comando:
+        try:
+            id_comando = str(uuid.UUID(id_comando))
+        except ValueError as exc:
+            raise HTTPException(
+                status_code=422,
+                detail={
+                    "message": "id_comando inválido. Use um UUID válido.",
+                    "error": str(exc),
+                },
+            )
+
+    select_comando_sql = """
+    SELECT
+        ce.id,
+        ce.id_comando,
+        ce.tenant_id,
+        ce.obra_codigo,
+        ce.correlation_id,
+        ce.agente_origem,
+        ce.agente_destino,
+        ce.tipo_comando,
+        ce.payload_comando,
+        ce.status,
+        ce.requer_aprovacao,
+        et.chat_id,
+        et.telegram_user_id,
+        et.telegram_message_id
+    FROM comandos_executivos AS ce
+    LEFT JOIN eventos_telegram AS et
+        ON et.id = ce.evento_telegram_id
+    WHERE ce.agente_destino = 'AGENTE_006_COMUNICACAO_VISUAL_OBRA'
+      AND ce.tipo_comando = 'PREPARAR_PLACA_AVISO'
+      AND ce.status = 'PENDENTE'
+      AND (%(id_comando)s::uuid IS NULL OR ce.id_comando = %(id_comando)s::uuid)
+    ORDER BY ce.criado_em
+    LIMIT 1
+    FOR UPDATE OF ce;
+    """
+
+    update_resultado_sql = """
+    UPDATE comandos_executivos
+    SET resultado = %(resultado)s,
+        executado_por = 'AGENTE_006_COMUNICACAO_VISUAL_OBRA',
+        executado_em = NOW(),
+        mensagem_erro = NULL,
+        atualizado_em = NOW()
+    WHERE id = %(id)s
+      AND status = 'PENDENTE'
+      AND tipo_comando = 'PREPARAR_PLACA_AVISO'
+    RETURNING id;
+    """
+
+    update_status_sql = """
+    UPDATE comandos_executivos
+    SET status = 'CONCLUIDO',
+        atualizado_em = NOW()
+    WHERE id = %(id)s
+      AND status = 'PENDENTE'
+      AND tipo_comando = 'PREPARAR_PLACA_AVISO'
+      AND resultado IS NOT NULL
+    RETURNING id, id_comando, status, resultado;
+    """
+
+    try:
+        conn = get_db_connection()
+        try:
+            with conn.cursor() as cur:
+                cur.execute(select_comando_sql, {"id_comando": id_comando})
+                row = cur.fetchone()
+
+                if row is None:
+                    conn.rollback()
+                    return {
+                        "ok": True,
+                        "processado": False,
+                        "agente_destino": "AGENTE_006_COMUNICACAO_VISUAL_OBRA",
+                        "message": (
+                            "Nenhum comando PENDENTE PREPARAR_PLACA_AVISO para "
+                            "AGENTE_006_COMUNICACAO_VISUAL_OBRA encontrado."
+                        ),
+                    }
+
+                comando = {
+                    "id": row[0],
+                    "id_comando": row[1],
+                    "tenant_id": row[2],
+                    "obra_codigo": row[3],
+                    "correlation_id": row[4],
+                    "agente_origem": row[5],
+                    "agente_destino": row[6],
+                    "tipo_comando": row[7],
+                    "payload_comando": row[8],
+                    "status": row[9],
+                    "requer_aprovacao": row[10],
+                    "telegram_chat_id": row[11],
+                    "telegram_user_id": row[12],
+                    "telegram_message_id": row[13],
+                }
+
+                resultado = montar_resultado_agente_comunicacao_obra(comando)
+
+                cur.execute(
+                    update_resultado_sql,
+                    {
+                        "id": comando["id"],
+                        "resultado": Json(resultado),
+                    },
+                )
+                resultado_row = cur.fetchone()
+                if resultado_row is None:
+                    raise RuntimeError("Resultado do comando de comunicação visual não foi salvo.")
+
+                cur.execute(update_status_sql, {"id": comando["id"]})
+                concluido_row = cur.fetchone()
+                if concluido_row is None:
+                    raise RuntimeError(
+                        "Status do comando de comunicação visual não foi atualizado para CONCLUIDO."
+                    )
+
+            conn.commit()
+
+        except Exception:
+            conn.rollback()
+            raise
+
+        finally:
+            conn.close()
+
+    except Exception as exc:
+        raise HTTPException(
+            status_code=500,
+            detail={
+                "message": "Erro ao processar comando executivo do Agente 006 Comunicação Visual.",
+                "error": str(exc),
+            },
+        )
+
+    return {
+        "ok": True,
+        "processado": True,
+        "comando_executivo_id": concluido_row[0],
+        "id_comando": str(concluido_row[1]),
+        "status_comando": concluido_row[2],
+        "tipo_resultado": concluido_row[3].get("tipo_resultado"),
+        "agente_destino": "AGENTE_006_COMUNICACAO_VISUAL_OBRA",
+        "agente_processador": "AGENTE_006_COMUNICACAO_VISUAL_OBRA",
+        "telegram_chat_id": comando["telegram_chat_id"],
+        "telegram_user_id": comando["telegram_user_id"],
+        "telegram_message_id": comando["telegram_message_id"],
+        "mensagem_resposta_executiva": montar_mensagem_resposta_executiva_comunicacao_obra(
+            comando["obra_codigo"],
+            concluido_row[3].get("tipo_resultado"),
+        ),
+        "acoes_externas_executadas": False,
+        "message": "Comando AGENTE_006_COMUNICACAO_VISUAL_OBRA processado sem ações externas.",
     }
 
 
