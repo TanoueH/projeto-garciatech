@@ -179,6 +179,15 @@ class ProcessarComandoComunicacaoObraRequest(BaseModel):
     id_comando: Optional[str] = None
 
 
+class GestaoOperacionalObraRequest(BaseModel):
+    obra_codigo: str
+
+
+class GestaoOperacionalAreaRequest(BaseModel):
+    obra_codigo: str
+    codigo_area: str
+
+
 def get_db_connection():
     if not DATABASE_URL:
         raise RuntimeError("DATABASE_URL não definida.")
@@ -597,6 +606,113 @@ def table_exists(conn, qualified_name: str) -> bool:
         cur.execute("SELECT to_regclass(%s);", (qualified_name,))
         row = cur.fetchone()
     return bool(row and row[0])
+
+
+AGENTE_008_SEGURANCA_CONSULTA = {
+    "modo": "CONSULTA",
+    "altera_cronograma": False,
+    "executa_rpa": False,
+    "sincroniza_openproject": False,
+    "altera_rdo_oficial": False,
+    "envia_terceiros": False,
+}
+
+
+def serialize_date(value: Any) -> Optional[str]:
+    return value.isoformat() if value else None
+
+
+def serialize_numeric(value: Any) -> float:
+    return float(value or 0)
+
+
+def fetch_status_counts(conn, table_name: str, status_column: str, obra_codigo: str) -> dict[str, int]:
+    sql = f"""
+    SELECT {status_column}, COUNT(*)
+    FROM {table_name}
+    WHERE obra_codigo = %(obra_codigo)s
+    GROUP BY {status_column}
+    ORDER BY {status_column};
+    """
+    with conn.cursor() as cur:
+        cur.execute(sql, {"obra_codigo": obra_codigo})
+        return {row[0]: row[1] for row in cur.fetchall()}
+
+
+def formatar_atividade_gestao_operacional(row: tuple[Any, ...]) -> dict[str, Any]:
+    return {
+        "codigo_atividade": row[0],
+        "codigo_eap": row[1],
+        "codigo_area": row[2],
+        "descricao": row[3],
+        "disciplina": row[4],
+        "frente_servico": row[5],
+        "data_inicio_planejada": serialize_date(row[6]),
+        "data_fim_planejada": serialize_date(row[7]),
+        "data_inicio_reprogramada": serialize_date(row[8]),
+        "data_fim_reprogramada": serialize_date(row[9]),
+        "percentual_planejado": serialize_numeric(row[10]),
+        "percentual_real": serialize_numeric(row[11]),
+        "status_atividade": row[12],
+        "responsavel": row[13],
+        "horizonte_planejamento": row[14],
+        "criticidade": row[15],
+        "restricoes_resumo": row[16] or [],
+    }
+
+
+def listar_atividades_gestao_operacional(
+    conn,
+    obra_codigo: str,
+    horizonte_planejamento: str,
+    inicio_offset_dias: int,
+    fim_offset_dias: int,
+) -> list[dict[str, Any]]:
+    sql = """
+    SELECT
+        codigo_atividade,
+        codigo_eap,
+        codigo_area,
+        descricao,
+        disciplina,
+        frente_servico,
+        data_inicio_planejada,
+        data_fim_planejada,
+        data_inicio_reprogramada,
+        data_fim_reprogramada,
+        percentual_planejado,
+        percentual_real,
+        status_atividade,
+        responsavel,
+        horizonte_planejamento,
+        criticidade,
+        restricoes_resumo
+    FROM atividades_cronograma
+    WHERE obra_codigo = %(obra_codigo)s
+      AND (
+          horizonte_planejamento = %(horizonte_planejamento)s
+          OR (
+              COALESCE(data_inicio_reprogramada, data_inicio_planejada) >= CURRENT_DATE + %(inicio_offset_dias)s::int
+              AND COALESCE(data_inicio_reprogramada, data_inicio_planejada) <= CURRENT_DATE + %(fim_offset_dias)s::int
+          )
+      )
+    ORDER BY
+        COALESCE(data_inicio_reprogramada, data_inicio_planejada) NULLS LAST,
+        codigo_area NULLS LAST,
+        codigo_atividade
+    LIMIT 200;
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            sql,
+            {
+                "obra_codigo": obra_codigo,
+                "horizonte_planejamento": horizonte_planejamento,
+                "inicio_offset_dias": inicio_offset_dias,
+                "fim_offset_dias": fim_offset_dias,
+            },
+        )
+        return [formatar_atividade_gestao_operacional(row) for row in cur.fetchall()]
 
 
 def listar_pendencias_rdo(conn, obra_codigo: Optional[str]) -> list[dict[str, Any]]:
@@ -1641,6 +1757,370 @@ def healthcheck():
         "version": APP_VERSION,
         "database": db_status,
         "timestamp": datetime.now(timezone.utc).isoformat(),
+    }
+
+
+@app.get("/agentes/gestao-operacional/status")
+def status_agente_gestao_operacional():
+    return {
+        "ok": True,
+        "agente": "AGENTE_008_GESTAO_OPERACIONAL_OBRA",
+        "mvp": "0.6C",
+        "descricao": "Endpoints iniciais de consulta operacional da obra.",
+        **AGENTE_008_SEGURANCA_CONSULTA,
+    }
+
+
+@app.post("/agentes/gestao-operacional/status-obra")
+def status_obra_gestao_operacional(payload: GestaoOperacionalObraRequest):
+    obra_codigo = payload.obra_codigo
+
+    try:
+        with get_db_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT
+                        (SELECT COUNT(*) FROM areas_obra WHERE obra_codigo = %(obra_codigo)s),
+                        (SELECT COUNT(*) FROM eap_obra WHERE obra_codigo = %(obra_codigo)s),
+                        (SELECT COUNT(*) FROM atividades_cronograma WHERE obra_codigo = %(obra_codigo)s),
+                        (
+                            SELECT COUNT(*)
+                            FROM restricoes_atividade
+                            WHERE obra_codigo = %(obra_codigo)s
+                              AND criticidade = 'CRITICA'
+                              AND status_restricao IN ('ABERTA', 'EM_TRATAMENTO', 'BLOQUEANTE')
+                        ),
+                        (
+                            SELECT resumo_executivo
+                            FROM planos_operacionais_obra
+                            WHERE obra_codigo = %(obra_codigo)s
+                              AND resumo_executivo IS NOT NULL
+                            ORDER BY data_plano DESC, criado_em DESC
+                            LIMIT 1
+                        );
+                    """,
+                    {"obra_codigo": obra_codigo},
+                )
+                row = cur.fetchone()
+
+            atividades_por_status = fetch_status_counts(
+                conn,
+                "atividades_cronograma",
+                "status_atividade",
+                obra_codigo,
+            )
+            restricoes_por_status = fetch_status_counts(
+                conn,
+                "restricoes_atividade",
+                "status_restricao",
+                obra_codigo,
+            )
+            planos_por_status = fetch_status_counts(
+                conn,
+                "planos_operacionais_obra",
+                "status_plano",
+                obra_codigo,
+            )
+
+    except Exception as exc:
+        raise HTTPException(
+            status_code=500,
+            detail={
+                "message": "Erro ao consultar status operacional da obra.",
+                "error": str(exc),
+            },
+        )
+
+    resumo_executivo = row[4] if row and row[4] else "Sem plano operacional resumido cadastrado."
+    return {
+        "ok": True,
+        "agente": "AGENTE_008_GESTAO_OPERACIONAL_OBRA",
+        "obra_codigo": obra_codigo,
+        **AGENTE_008_SEGURANCA_CONSULTA,
+        "areas_total": row[0] if row else 0,
+        "eap_total": row[1] if row else 0,
+        "atividades_total": row[2] if row else 0,
+        "atividades_por_status": atividades_por_status,
+        "restricoes_por_status": restricoes_por_status,
+        "restricoes_criticas": row[3] if row else 0,
+        "planos_por_status": planos_por_status,
+        "resumo_executivo": resumo_executivo,
+    }
+
+
+@app.post("/agentes/gestao-operacional/cronograma-15d")
+def cronograma_15d_gestao_operacional(payload: GestaoOperacionalObraRequest):
+    try:
+        with get_db_connection() as conn:
+            atividades = listar_atividades_gestao_operacional(
+                conn,
+                payload.obra_codigo,
+                "0_15_DIAS",
+                0,
+                15,
+            )
+    except Exception as exc:
+        raise HTTPException(
+            status_code=500,
+            detail={
+                "message": "Erro ao consultar cronograma operacional de 15 dias.",
+                "error": str(exc),
+            },
+        )
+
+    return {
+        "ok": True,
+        "agente": "AGENTE_008_GESTAO_OPERACIONAL_OBRA",
+        "obra_codigo": payload.obra_codigo,
+        **AGENTE_008_SEGURANCA_CONSULTA,
+        "horizonte": "0_15_DIAS",
+        "atividades_total": len(atividades),
+        "atividades": atividades,
+    }
+
+
+@app.post("/agentes/gestao-operacional/lookahead-30d")
+def lookahead_30d_gestao_operacional(payload: GestaoOperacionalObraRequest):
+    try:
+        with get_db_connection() as conn:
+            atividades = listar_atividades_gestao_operacional(
+                conn,
+                payload.obra_codigo,
+                "15_30_DIAS",
+                15,
+                30,
+            )
+    except Exception as exc:
+        raise HTTPException(
+            status_code=500,
+            detail={
+                "message": "Erro ao consultar lookahead operacional de 30 dias.",
+                "error": str(exc),
+            },
+        )
+
+    return {
+        "ok": True,
+        "agente": "AGENTE_008_GESTAO_OPERACIONAL_OBRA",
+        "obra_codigo": payload.obra_codigo,
+        **AGENTE_008_SEGURANCA_CONSULTA,
+        "horizonte": "15_30_DIAS",
+        "atividades_total": len(atividades),
+        "atividades": atividades,
+    }
+
+
+@app.post("/agentes/gestao-operacional/programacao-mensal")
+def programacao_mensal_gestao_operacional(payload: GestaoOperacionalObraRequest):
+    sql = """
+    SELECT
+        a.codigo_area,
+        a.nome_area,
+        COUNT(ac.id) AS atividades_total,
+        COUNT(ac.id) FILTER (WHERE ac.status_atividade = 'EM_EXECUCAO') AS em_execucao,
+        COUNT(ac.id) FILTER (WHERE ac.status_atividade = 'BLOQUEADA') AS bloqueadas,
+        COUNT(ac.id) FILTER (WHERE ac.status_atividade = 'CONCLUIDA') AS concluidas,
+        COALESCE(ROUND(AVG(ac.percentual_real), 2), 0) AS percentual_real_medio,
+        COUNT(DISTINCT r.id) FILTER (
+            WHERE r.status_restricao IN ('ABERTA', 'EM_TRATAMENTO', 'BLOQUEANTE')
+        ) AS restricoes_abertas
+    FROM areas_obra AS a
+    LEFT JOIN atividades_cronograma AS ac
+        ON ac.obra_codigo = a.obra_codigo
+       AND ac.codigo_area = a.codigo_area
+    LEFT JOIN restricoes_atividade AS r
+        ON r.obra_codigo = a.obra_codigo
+       AND r.atividade_id = ac.id
+    WHERE a.obra_codigo = %(obra_codigo)s
+      AND a.ativo = TRUE
+    GROUP BY a.codigo_area, a.nome_area, a.ordem
+    ORDER BY a.ordem, a.codigo_area;
+    """
+
+    try:
+        with get_db_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(sql, {"obra_codigo": payload.obra_codigo})
+                areas = [
+                    {
+                        "codigo_area": row[0],
+                        "nome_area": row[1],
+                        "atividades_total": row[2],
+                        "em_execucao": row[3],
+                        "bloqueadas": row[4],
+                        "concluidas": row[5],
+                        "percentual_real_medio": serialize_numeric(row[6]),
+                        "restricoes_abertas": row[7],
+                    }
+                    for row in cur.fetchall()
+                ]
+    except Exception as exc:
+        raise HTTPException(
+            status_code=500,
+            detail={
+                "message": "Erro ao consultar programação mensal operacional.",
+                "error": str(exc),
+            },
+        )
+
+    return {
+        "ok": True,
+        "agente": "AGENTE_008_GESTAO_OPERACIONAL_OBRA",
+        "obra_codigo": payload.obra_codigo,
+        **AGENTE_008_SEGURANCA_CONSULTA,
+        "areas_total": len(areas),
+        "areas": areas,
+    }
+
+
+@app.post("/agentes/gestao-operacional/area-status")
+def area_status_gestao_operacional(payload: GestaoOperacionalAreaRequest):
+    try:
+        with get_db_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT
+                        codigo_area,
+                        nome_area,
+                        tipo_area,
+                        descricao,
+                        ordem,
+                        ativo
+                    FROM areas_obra
+                    WHERE obra_codigo = %(obra_codigo)s
+                      AND codigo_area = %(codigo_area)s
+                    LIMIT 1;
+                    """,
+                    {
+                        "obra_codigo": payload.obra_codigo,
+                        "codigo_area": payload.codigo_area,
+                    },
+                )
+                area_row = cur.fetchone()
+
+            if area_row is None:
+                raise HTTPException(
+                    status_code=404,
+                    detail={
+                        "message": "Área operacional não encontrada.",
+                        "obra_codigo": payload.obra_codigo,
+                        "codigo_area": payload.codigo_area,
+                    },
+                )
+
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT
+                        COUNT(*),
+                        COUNT(*) FILTER (WHERE status_atividade = 'EM_EXECUCAO'),
+                        COUNT(*) FILTER (WHERE status_atividade = 'BLOQUEADA'),
+                        COUNT(*) FILTER (WHERE status_atividade = 'CONCLUIDA'),
+                        COALESCE(ROUND(AVG(percentual_real), 2), 0)
+                    FROM atividades_cronograma
+                    WHERE obra_codigo = %(obra_codigo)s
+                      AND codigo_area = %(codigo_area)s;
+                    """,
+                    {
+                        "obra_codigo": payload.obra_codigo,
+                        "codigo_area": payload.codigo_area,
+                    },
+                )
+                resumo_row = cur.fetchone()
+
+                cur.execute(
+                    """
+                    SELECT r.status_restricao, COUNT(*)
+                    FROM restricoes_atividade AS r
+                    JOIN atividades_cronograma AS ac
+                        ON ac.id = r.atividade_id
+                       AND ac.obra_codigo = r.obra_codigo
+                    WHERE r.obra_codigo = %(obra_codigo)s
+                      AND ac.codigo_area = %(codigo_area)s
+                    GROUP BY r.status_restricao
+                    ORDER BY r.status_restricao;
+                    """,
+                    {
+                        "obra_codigo": payload.obra_codigo,
+                        "codigo_area": payload.codigo_area,
+                    },
+                )
+                restricoes_por_status = {row[0]: row[1] for row in cur.fetchall()}
+
+                cur.execute(
+                    """
+                    SELECT
+                        codigo_atividade,
+                        codigo_eap,
+                        codigo_area,
+                        descricao,
+                        disciplina,
+                        frente_servico,
+                        data_inicio_planejada,
+                        data_fim_planejada,
+                        data_inicio_reprogramada,
+                        data_fim_reprogramada,
+                        percentual_planejado,
+                        percentual_real,
+                        status_atividade,
+                        responsavel,
+                        horizonte_planejamento,
+                        criticidade,
+                        restricoes_resumo
+                    FROM atividades_cronograma
+                    WHERE obra_codigo = %(obra_codigo)s
+                      AND codigo_area = %(codigo_area)s
+                    ORDER BY
+                        COALESCE(data_inicio_reprogramada, data_inicio_planejada) NULLS LAST,
+                        codigo_atividade
+                    LIMIT 100;
+                    """,
+                    {
+                        "obra_codigo": payload.obra_codigo,
+                        "codigo_area": payload.codigo_area,
+                    },
+                )
+                atividades = [
+                    formatar_atividade_gestao_operacional(row) for row in cur.fetchall()
+                ]
+
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(
+            status_code=500,
+            detail={
+                "message": "Erro ao consultar status operacional da área.",
+                "error": str(exc),
+            },
+        )
+
+    return {
+        "ok": True,
+        "agente": "AGENTE_008_GESTAO_OPERACIONAL_OBRA",
+        "obra_codigo": payload.obra_codigo,
+        **AGENTE_008_SEGURANCA_CONSULTA,
+        "area": {
+            "codigo_area": area_row[0],
+            "nome_area": area_row[1],
+            "tipo_area": area_row[2],
+            "descricao": area_row[3],
+            "ordem": area_row[4],
+            "ativo": area_row[5],
+        },
+        "atividades_total": resumo_row[0] if resumo_row else 0,
+        "em_execucao": resumo_row[1] if resumo_row else 0,
+        "bloqueadas": resumo_row[2] if resumo_row else 0,
+        "concluidas": resumo_row[3] if resumo_row else 0,
+        "percentual_real_medio": serialize_numeric(resumo_row[4] if resumo_row else 0),
+        "restricoes_por_status": restricoes_por_status,
+        "restricoes_abertas": sum(
+            restricoes_por_status.get(status, 0)
+            for status in ("ABERTA", "EM_TRATAMENTO", "BLOQUEANTE")
+        ),
+        "atividades": atividades,
     }
 
 
