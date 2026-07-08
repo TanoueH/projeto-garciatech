@@ -1,4 +1,5 @@
 import hashlib
+import html
 import re
 import json
 import os
@@ -18,6 +19,109 @@ from pydantic import BaseModel, Field
 
 APP_NAME = "Construction Science Agents API"
 APP_VERSION = "0.1.0"
+
+# BASELINE VISUAL APROVADA — OBRA_CAIO_SUM_V1.
+# Não alterar múltiplos blocos visuais na mesma rodada.
+# Ajustes futuros devem ser feitos primeiro em scripts/dev/preview_placa_template.py e só depois migrados para este template.
+TEMPLATE_VISUAL_OBRA_CAIO_SUM_V1: dict[str, Any] = {
+    "id": "OBRA_CAIO_SUM_V1",
+    "pagina": {
+        "largura_cm": 21.0,
+        "altura_cm": 29.7,
+        "orientacao": "A4_VERTICAL",
+    },
+    "cores": {
+        "azul_petroleo": "#005A64",
+        "amarelo_atencao": "#F2C230",
+        "branco": "#FFFFFF",
+        "preto": "#000000",
+        "cinza_texto": "#333333",
+    },
+    "fontes": {
+        "familia_base": "Helvetica",
+        "familia_negrito": "Helvetica-Bold",
+        "familia_sum": "Helvetica",
+        "cabecalho_max": 50,
+        "cabecalho_min": 34,
+        "sum": 46,
+        "sum_gap_su": -7.0,
+        "sum_gap_um": -9.0,
+        "pictograma_placeholder_grande": 95,
+        "pictograma_placeholder_textual": 72,
+        "texto_principal_max": 34,
+        "texto_principal_min": 24,
+        "texto_secundario_max": 18,
+        "texto_secundario_min": 14,
+        "rodape": 7,
+    },
+    "margens": {
+        "corpo_lateral_cm": 1.0,
+        "corpo_inferior_cm": 1.8,
+    },
+    "cabecalho": {
+        "x_cm": 0.0,
+        "y_cm": 24.2,
+        "largura_cm": 21.0,
+        "altura_cm": 5.5,
+    },
+    "triangulo_atencao": {
+        "x_cm": 1.2,
+        "y_cm": 25.55,
+        "largura_cm": 3.0,
+        "altura_cm": 3.0,
+        "exclamacao_y_offset_cm": 0.72,
+    },
+    "titulo_cabecalho": {
+        "x_cm": 4.55,
+        "y_cm": 26.05,
+        "largura_cm": 9.05,
+        "altura_cm": 1.8,
+    },
+    "separador_vertical": {
+        "x_cm": 13.95,
+        "y_cm": 25.45,
+        "largura_cm": 0.05,
+        "altura_cm": 3.15,
+    },
+    "sum": {
+        "texto": "SUM",
+        "x_cm": 14.65,
+        "y_cm": 26.08,
+        "largura_cm": 4.6,
+        "altura_cm": 1.8,
+    },
+    "corpo_branco": {
+        "x_cm": 1.0,
+        "y_cm": 1.8,
+        "largura_cm": 19.0,
+        "altura_cm": 22.4,
+    },
+    "circulo_pictograma": {
+        "centro_x_cm": 10.5,
+        "centro_y_cm": 14.3,
+        "raio_cm": 7.3,
+        "exclamacao_y_cm": 13.22,
+    },
+    "texto_principal": {
+        "x_cm": 1.0,
+        "y_cm": 4.75,
+        "largura_cm": 19.0,
+        "altura_cm": 1.0,
+        "max_linhas": 2,
+    },
+    "texto_secundario": {
+        "x_cm": 1.0,
+        "y_cm": 3.45,
+        "largura_cm": 19.0,
+        "altura_cm": 1.0,
+        "max_linhas": 2,
+    },
+    "rodape": {
+        "texto": "",
+        "x_centro_cm": 10.5,
+        "y_cm": 0.65,
+    },
+}
 
 
 DATABASE_URL = os.getenv("DATABASE_URL")
@@ -699,12 +803,106 @@ def inferir_local_instalacao_placa(conteudo: Optional[str]) -> Optional[str]:
     return None
 
 
+def extrair_campos_explicitos_placa(conteudo: Optional[str]) -> dict[str, str]:
+    texto = conteudo or ""
+    labels: list[tuple[str, str]] = [
+        ("titulo_cabecalho", r"cabe[çc]alho"),
+        ("titulo_cabecalho", r"t[íi]tulo"),
+        ("texto_principal", r"frase principal"),
+        ("texto_principal", r"texto principal"),
+        ("texto_secundario", r"frase inferior"),
+        ("texto_secundario", r"texto inferior"),
+        ("texto_secundario", r"texto secund[áa]rio"),
+        ("descricao_pictograma", r"pictograma"),
+        ("local_instalacao_sugerido", r"local"),
+        ("tipo_placa", r"tipo"),
+        ("tema_placa", r"tema"),
+    ]
+    label_union = "|".join(label for _, label in labels)
+    campos: dict[str, str] = {}
+
+    for campo, label in labels:
+        match = re.search(
+            rf"(?ims)^\s*{label}\s*:\s*(.+?)(?=^\s*(?:{label_union})\s*:|\Z)",
+            texto,
+        )
+        if match:
+            valor = re.sub(r"\s+", " ", match.group(1)).strip(" -\t\r\n")
+            if valor and campo not in campos:
+                campos[campo] = valor
+
+    return campos
+
+
+def normalizar_label_operacional(value: Optional[str]) -> Optional[str]:
+    texto = re.sub(r"\s+", " ", value or "").strip()
+    if not texto:
+        return None
+    return re.sub(r"[^0-9A-Za-zÀ-ÿ]+", "_", texto).strip("_").upper() or None
+
+
+def normalizar_conteudo_variavel_placa(
+    titulo_cabecalho: str,
+    texto_principal: str,
+    texto_secundario: str,
+    descricao_pictograma: Optional[str],
+    local_instalacao_sugerido: Optional[str],
+    tipo_placa: str,
+    tema_placa: Optional[str],
+) -> dict[str, Optional[str]]:
+    titulo_normalizado = re.sub(r"\s+", " ", titulo_cabecalho or "").strip()
+    texto_principal_normalizado = re.sub(r"\s+", " ", texto_principal or "").strip()
+    texto_secundario_normalizado = re.sub(r"\s+", " ", texto_secundario or "").strip()
+
+    if len(titulo_normalizado) > 22:
+        texto_longo = titulo_normalizado
+        titulo_normalizado = "Atenção"
+        if texto_principal_normalizado and texto_principal_normalizado != texto_longo:
+            texto_principal_normalizado = f"{texto_longo} {texto_principal_normalizado}"
+        else:
+            texto_principal_normalizado = texto_longo
+
+    return {
+        "titulo_cabecalho": titulo_normalizado or "Atenção",
+        "texto_principal": texto_principal_normalizado
+        or "Aviso preliminar para comunicação visual da obra.",
+        "texto_secundario": texto_secundario_normalizado
+        or "Validar conteúdo, pictograma, dimensões e local antes de uso.",
+        "descricao_pictograma": (
+            re.sub(r"\s+", " ", descricao_pictograma).strip()
+            if descricao_pictograma
+            else None
+        ),
+        "local_instalacao_sugerido": (
+            re.sub(r"\s+", " ", local_instalacao_sugerido).strip()
+            if local_instalacao_sugerido
+            else None
+        ),
+        "tipo_placa": tipo_placa,
+        "tema_placa": (
+            re.sub(r"\s+", " ", tema_placa).strip()
+            if tema_placa
+            else None
+        ),
+    }
+
+
+def montar_template_fixo_placa_aviso() -> dict[str, Any]:
+    return json.loads(
+        json.dumps(TEMPLATE_VISUAL_OBRA_CAIO_SUM_V1, ensure_ascii=False)
+    )
+
+
 def montar_resultado_agente_comunicacao_obra(comando: dict[str, Any]) -> dict[str, Any]:
     payload_comando = comando["payload_comando"] or {}
     entrada = payload_comando.get("entrada", {})
     conteudo = entrada.get("conteudo")
-    tipo_placa = inferir_tipo_placa_aviso(conteudo)
-    local_instalacao = inferir_local_instalacao_placa(conteudo)
+    campos_explicitos = extrair_campos_explicitos_placa(conteudo)
+    tipo_placa = (
+        normalizar_label_operacional(campos_explicitos.get("tipo_placa"))
+        or inferir_tipo_placa_aviso(conteudo)
+    )
+    tema_placa = campos_explicitos.get("tema_placa")
     cor_base = "azul-petroleo"
     estilo_visual_referencia = "docs/reference/placas/README.md"
 
@@ -741,12 +939,23 @@ def montar_resultado_agente_comunicacao_obra(comando: dict[str, Any]) -> dict[st
         )
         formato_sugerido = "A3 vertical ou A4 vertical, conforme distância de leitura"
 
+    conteudo_variavel = normalizar_conteudo_variavel_placa(
+        campos_explicitos.get("titulo_cabecalho", titulo),
+        campos_explicitos.get("texto_principal", mensagem_principal),
+        campos_explicitos.get("texto_secundario", mensagem_secundaria),
+        campos_explicitos.get("descricao_pictograma"),
+        campos_explicitos.get("local_instalacao_sugerido")
+        or inferir_local_instalacao_placa(conteudo),
+        tipo_placa,
+        tema_placa,
+    )
     tipo_icone = "triangulo_amarelo_atencao"
     area_pictograma = {
         "posicao": "corpo branco central",
-        "composicao": "pictograma grande em círculo azul",
-        "status": "pictograma_preliminar_a_definir",
+        "composicao": "placeholder técnico textual em círculo azul-petróleo fixo de 15 cm",
+        "status": "placeholder_tecnico_sem_imagem_externa",
     }
+    template_fixo = montar_template_fixo_placa_aviso()
     observacao_validacao_tecnica = (
         "Rascunho não oficial baseado na referência visual Obra-Caio/SUM. "
         "Validar texto, pictograma, local, dimensões e requisitos aplicáveis "
@@ -761,7 +970,7 @@ def montar_resultado_agente_comunicacao_obra(comando: dict[str, Any]) -> dict[st
         "material_da_placa",
         "necessidade_de_pictogramas",
     ]
-    if local_instalacao is None:
+    if conteudo_variavel["local_instalacao_sugerido"] is None:
         campos_a_confirmar.append("local_instalacao")
 
     return {
@@ -772,20 +981,25 @@ def montar_resultado_agente_comunicacao_obra(comando: dict[str, Any]) -> dict[st
         "correlation_id": str(comando["correlation_id"]),
         "obra_codigo": comando["obra_codigo"],
         "tipo_comando": comando["tipo_comando"],
-        "titulo": titulo,
-        "titulo_cabecalho": titulo,
-        "mensagem_principal": mensagem_principal,
-        "mensagem_secundaria": mensagem_secundaria,
+        "template_visual": "OBRA_CAIO_SUM_V1",
+        "template_fixo": template_fixo,
+        "conteudo_variavel": conteudo_variavel,
+        "titulo": conteudo_variavel["titulo_cabecalho"],
+        "titulo_cabecalho": conteudo_variavel["titulo_cabecalho"],
+        "mensagem_principal": conteudo_variavel["texto_principal"],
+        "mensagem_secundaria": conteudo_variavel["texto_secundario"],
         "tipo_placa": tipo_placa,
+        "tema_placa": conteudo_variavel["tema_placa"],
         "tipo_icone": tipo_icone,
         "cor_base": cor_base,
         "area_pictograma": area_pictograma,
-        "texto_principal": mensagem_principal,
-        "texto_secundario": mensagem_secundaria,
+        "texto_principal": conteudo_variavel["texto_principal"],
+        "texto_secundario": conteudo_variavel["texto_secundario"],
+        "descricao_pictograma": conteudo_variavel["descricao_pictograma"],
         "formato_sugerido": formato_sugerido,
         "estilo_visual_referencia": estilo_visual_referencia,
         "observacao_validacao_tecnica": observacao_validacao_tecnica,
-        "local_instalacao_sugerido": local_instalacao,
+        "local_instalacao_sugerido": conteudo_variavel["local_instalacao_sugerido"],
         "status": "RASCUNHO_NAO_OFICIAL",
         "campos_a_confirmar": campos_a_confirmar,
         "observacao_validacao": (
@@ -817,7 +1031,529 @@ def montar_mensagem_resposta_executiva_comunicacao_obra(
             "Validar com responsável técnico/segurança do trabalho antes de uso oficial."
         )
 
+    if tipo_resultado == "PDF_PLACA_AVISO_GERADO":
+        return (
+            f"PDF local de rascunho de placa de aviso gerado para {obra_codigo}. "
+            "Status: rascunho não oficial. Nenhuma impressão, RPA, OpenClaw, RDO oficial "
+            "ou envio a terceiros foi executado."
+        )
+
     return None
+
+
+def normalizar_nome_diretorio(value: Optional[str]) -> str:
+    normalized = re.sub(r"[^A-Za-z0-9_-]+", "-", value or "obra-sem-codigo").strip("-")
+    return normalized or "obra-sem-codigo"
+
+
+def extrair_texto_placa_pdf(
+    comando: dict[str, Any],
+    rascunho_origem: Optional[dict[str, Any]] = None,
+) -> dict[str, str]:
+    payload_comando = comando["payload_comando"] or {}
+    rascunho = (
+        (rascunho_origem or {}).get("resultado")
+        or payload_comando.get("rascunho")
+        or payload_comando.get("resultado_origem")
+        or {}
+    )
+    entrada = payload_comando.get("entrada", {})
+
+    titulo = rascunho.get("titulo_cabecalho") or rascunho.get("titulo") or "Atenção"
+    texto_principal = (
+        rascunho.get("texto_principal")
+        or rascunho.get("mensagem_principal")
+        # Fallback final: texto bruto do comando de PDF só entra se não houver rascunho.
+        or entrada.get("conteudo")
+        or "Aviso preliminar para comunicação visual da obra."
+    )
+    texto_secundario = (
+        rascunho.get("texto_secundario")
+        or rascunho.get("mensagem_secundaria")
+        or "Validar conteúdo, pictograma, dimensões e local antes de uso."
+    )
+    descricao_pictograma = rascunho.get("descricao_pictograma")
+    local_instalacao_sugerido = rascunho.get("local_instalacao_sugerido")
+    tipo_placa = rascunho.get("tipo_placa") or rascunho.get(
+        "conteudo_variavel",
+        {},
+    ).get("tipo_placa")
+    tema_placa = rascunho.get("tema_placa") or rascunho.get(
+        "conteudo_variavel",
+        {},
+    ).get("tema_placa")
+
+    titulo = str(titulo).strip() or "Atenção"
+    texto_principal = str(texto_principal).strip()
+    if len(titulo) > 22:
+        texto_principal = f"{titulo} {texto_principal}".strip()
+        titulo = "Atenção"
+
+    return {
+        "titulo": titulo,
+        "texto_principal": texto_principal,
+        "texto_secundario": str(texto_secundario).strip(),
+        "descricao_pictograma": str(descricao_pictograma or "").strip(),
+        "local_instalacao_sugerido": str(local_instalacao_sugerido or "").strip(),
+        "tipo_icone": str(rascunho.get("tipo_icone") or "atencao").strip(),
+        "cor_base": str(rascunho.get("cor_base") or "#005A64").strip(),
+        "area_pictograma": str(rascunho.get("area_pictograma") or "central").strip(),
+        "template_visual": str(
+            rascunho.get("template_visual") or "OBRA_CAIO_SUM_V1"
+        ).strip(),
+        "tipo_placa": str(tipo_placa or "").strip(),
+        "tema_placa": str(tema_placa or "").strip(),
+    }
+
+
+def gerar_pdf_local_placa_aviso(
+    comando: dict[str, Any],
+    rascunho_origem: Optional[dict[str, Any]] = None,
+) -> str:
+    try:
+        from reportlab.lib import colors
+        from reportlab.lib.styles import ParagraphStyle
+        from reportlab.lib.units import cm
+        from reportlab.pdfgen import canvas
+        from reportlab.platypus import Paragraph
+    except ImportError as exc:
+        raise RuntimeError(
+            "Biblioteca reportlab não instalada. Instale as dependências de requirements-api.txt."
+        ) from exc
+
+    obra_dir_name = normalizar_nome_diretorio(comando["obra_codigo"])
+    output_dir = Path("outputs") / "placas" / obra_dir_name
+    output_dir.mkdir(parents=True, exist_ok=True)
+    arquivo_pdf = output_dir / f"placa_aviso_comando_{comando['id']}.pdf"
+
+    template = TEMPLATE_VISUAL_OBRA_CAIO_SUM_V1
+    textos = extrair_texto_placa_pdf(comando, rascunho_origem)
+    cores = template["cores"]
+    fontes = template["fontes"]
+    pagina = template["pagina"]
+
+    def cm_value(value: float) -> float:
+        return value * cm
+
+    def box(nome: str) -> dict[str, float]:
+        return {
+            chave: cm_value(valor)
+            for chave, valor in template[nome].items()
+            if isinstance(valor, (int, float))
+        }
+
+    def draw_centered_text(
+        text: str,
+        x_cm: float,
+        y_cm: float,
+        width_cm: float,
+        font_name: str,
+        font_size: int,
+        color: Any,
+    ) -> None:
+        text_width = c.stringWidth(text, font_name, font_size)
+        text_object = c.beginText()
+        text_object.setTextOrigin(
+            cm_value(x_cm) + (cm_value(width_cm) - text_width) / 2,
+            cm_value(y_cm),
+        )
+        text_object.setFont(font_name, font_size)
+        text_object.setCharSpace(0)
+        text_object.setFillColor(color)
+        text_object.textLine(text)
+        c.drawText(text_object)
+
+    def draw_sum_text(
+        text: str,
+        x_cm: float,
+        y_cm: float,
+        width_cm: float,
+        font_name: str,
+        font_size: int,
+        color: Any,
+    ) -> None:
+        gap_su = fontes["sum_gap_su"]
+        gap_um = fontes["sum_gap_um"]
+        letter_widths = [
+            c.stringWidth(letter, font_name, font_size) for letter in text
+        ]
+        text_width = sum(letter_widths) + gap_su + gap_um
+        x_position = cm_value(x_cm) + (cm_value(width_cm) - text_width) / 2
+        y_position = cm_value(y_cm)
+
+        c.setFont(font_name, font_size)
+        c.setFillColor(color)
+        for index, letter in enumerate(text):
+            c.drawString(x_position, y_position, letter)
+            x_position += letter_widths[index]
+            if index == 0:
+                x_position += gap_su
+            elif index == 1:
+                x_position += gap_um
+
+    width = cm_value(pagina["largura_cm"])
+    height = cm_value(pagina["altura_cm"])
+    azul_petroleo = colors.HexColor(cores["azul_petroleo"])
+    amarelo_atencao = colors.HexColor(cores["amarelo_atencao"])
+    branco = colors.HexColor(cores["branco"])
+    preto = colors.HexColor(cores["preto"])
+
+    c = canvas.Canvas(str(arquivo_pdf), pagesize=(width, height))
+    c.setTitle(f"Rascunho placa aviso - {comando['obra_codigo']}")
+
+    c.setFillColor(azul_petroleo)
+    c.rect(0, 0, width, height, fill=1, stroke=0)
+
+    cabecalho = box("cabecalho")
+    triangulo = box("triangulo_atencao")
+    titulo_box = box("titulo_cabecalho")
+    separador = box("separador_vertical")
+    corpo = box("corpo_branco")
+    circulo = box("circulo_pictograma")
+    texto_principal_box = box("texto_principal")
+    texto_secundario_box = box("texto_secundario")
+
+    # Cabeçalho: triângulo de atenção, título, separador e referência textual SUM.
+    c.setFillColor(azul_petroleo)
+    c.rect(
+        cabecalho["x_cm"],
+        cabecalho["y_cm"],
+        cabecalho["largura_cm"],
+        cabecalho["altura_cm"],
+        fill=1,
+        stroke=0,
+    )
+
+    path = c.beginPath()
+    path.moveTo(
+        triangulo["x_cm"] + triangulo["largura_cm"] / 2,
+        triangulo["y_cm"] + triangulo["altura_cm"],
+    )
+    path.lineTo(triangulo["x_cm"], triangulo["y_cm"])
+    path.lineTo(triangulo["x_cm"] + triangulo["largura_cm"], triangulo["y_cm"])
+    path.close()
+    c.setFillColor(amarelo_atencao)
+    c.setStrokeColor(branco)
+    c.setLineWidth(1.5)
+    c.drawPath(path, fill=1, stroke=1)
+    c.setFillColor(preto)
+    c.setFont(fontes["familia_negrito"], 32)
+    c.drawCentredString(
+        triangulo["x_cm"] + triangulo["largura_cm"] / 2,
+        triangulo["y_cm"] + triangulo["exclamacao_y_offset_cm"],
+        "!",
+    )
+
+    def criar_paragrafo_ajustado(
+        nome: str,
+        texto: str,
+        fonte: str,
+        cor: Any,
+        largura_caixa: float,
+        altura_caixa: float,
+        tamanho_max: int,
+        tamanho_min: int,
+        alinhamento: int = 1,
+        leading_fator: float = 1.12,
+        max_linhas: Optional[int] = None,
+    ) -> tuple[Paragraph, float]:
+        for tamanho in range(tamanho_max, tamanho_min - 1, -1):
+            leading = tamanho * leading_fator
+            estilo = ParagraphStyle(
+                nome,
+                fontName=fonte,
+                fontSize=tamanho,
+                leading=leading,
+                alignment=alinhamento,
+                textColor=cor,
+            )
+            paragrafo = Paragraph(html.escape(texto), estilo)
+            _, altura = paragrafo.wrapOn(c, largura_caixa, altura_caixa)
+            altura_limite = altura_caixa
+            if max_linhas is not None:
+                altura_limite = min(altura_limite, leading * max_linhas)
+            if altura <= altura_limite:
+                return paragrafo, altura
+
+        leading = tamanho_min * leading_fator
+        estilo = ParagraphStyle(
+            nome,
+            fontName=fonte,
+            fontSize=tamanho_min,
+            leading=leading,
+            alignment=alinhamento,
+            textColor=cor,
+        )
+        paragrafo = Paragraph(html.escape(texto), estilo)
+        _, altura = paragrafo.wrapOn(c, largura_caixa, altura_caixa)
+        return paragrafo, min(altura, altura_caixa)
+
+    titulo_header = textos["titulo"].upper()
+    titulo_font_size = fontes["cabecalho_max"]
+    titulo_font_name = fontes["familia_negrito"]
+    titulo_width = c.stringWidth(titulo_header, titulo_font_name, titulo_font_size)
+    while (
+        titulo_width > titulo_box["largura_cm"]
+        and titulo_font_size > fontes["cabecalho_min"]
+    ):
+        titulo_font_size -= 1
+        titulo_width = c.stringWidth(titulo_header, titulo_font_name, titulo_font_size)
+    c.setFillColor(branco)
+    c.setFont(titulo_font_name, titulo_font_size)
+    c.drawString(
+        titulo_box["x_cm"] + (titulo_box["largura_cm"] - titulo_width) / 2,
+        titulo_box["y_cm"],
+        titulo_header,
+    )
+
+    c.setFillColor(branco)
+    c.rect(
+        separador["x_cm"],
+        separador["y_cm"],
+        separador["largura_cm"],
+        separador["altura_cm"],
+        fill=1,
+        stroke=0,
+    )
+
+    draw_sum_text(
+        text=template["sum"]["texto"],
+        x_cm=template["sum"]["x_cm"],
+        y_cm=template["sum"]["y_cm"],
+        width_cm=template["sum"]["largura_cm"],
+        font_name=fontes["familia_sum"],
+        font_size=fontes["sum"],
+        color=branco,
+    )
+
+    c.setFillColor(branco)
+    c.rect(
+        corpo["x_cm"],
+        corpo["y_cm"],
+        corpo["largura_cm"],
+        corpo["altura_cm"],
+        fill=1,
+        stroke=0,
+    )
+
+    c.setFillColor(azul_petroleo)
+    c.circle(
+        circulo["centro_x_cm"],
+        circulo["centro_y_cm"],
+        circulo["raio_cm"],
+        fill=1,
+        stroke=0,
+    )
+    c.setFillColor(branco)
+    pictograma = "!"
+    c.setFont(fontes["familia_negrito"], fontes["pictograma_placeholder_grande"])
+    c.drawCentredString(
+        circulo["centro_x_cm"],
+        circulo["exclamacao_y_cm"],
+        pictograma,
+    )
+
+    texto_principal = textos["texto_principal"]
+    if (
+        c.stringWidth(
+            texto_principal,
+            fontes["familia_negrito"],
+            fontes["texto_principal_max"],
+        )
+        <= texto_principal_box["largura_cm"]
+    ):
+        draw_centered_text(
+            text=texto_principal,
+            x_cm=template["texto_principal"]["x_cm"],
+            y_cm=template["texto_principal"]["y_cm"],
+            width_cm=template["texto_principal"]["largura_cm"],
+            font_name=fontes["familia_negrito"],
+            font_size=fontes["texto_principal_max"],
+            color=azul_petroleo,
+        )
+    else:
+        principal, principal_altura = criar_paragrafo_ajustado(
+            "texto_principal_placa",
+            texto_principal,
+            fontes["familia_negrito"],
+            azul_petroleo,
+            texto_principal_box["largura_cm"],
+            texto_principal_box["altura_cm"],
+            fontes["texto_principal_max"],
+            fontes["texto_principal_min"],
+            alinhamento=1,
+            max_linhas=template["texto_principal"]["max_linhas"],
+        )
+        principal.wrapOn(
+            c,
+            texto_principal_box["largura_cm"],
+            texto_principal_box["altura_cm"],
+        )
+        principal_y = texto_principal_box["y_cm"] + (
+            texto_principal_box["altura_cm"] - principal_altura
+        ) / 2
+        principal.drawOn(c, texto_principal_box["x_cm"], principal_y)
+
+    texto_secundario = textos["texto_secundario"]
+    if (
+        c.stringWidth(
+            texto_secundario,
+            fontes["familia_base"],
+            fontes["texto_secundario_max"],
+        )
+        <= texto_secundario_box["largura_cm"]
+    ):
+        draw_centered_text(
+            text=texto_secundario,
+            x_cm=template["texto_secundario"]["x_cm"],
+            y_cm=template["texto_secundario"]["y_cm"],
+            width_cm=template["texto_secundario"]["largura_cm"],
+            font_name=fontes["familia_base"],
+            font_size=fontes["texto_secundario_max"],
+            color=preto,
+        )
+    else:
+        secundario, secundario_altura = criar_paragrafo_ajustado(
+            "texto_secundario_placa",
+            texto_secundario,
+            fontes["familia_base"],
+            preto,
+            texto_secundario_box["largura_cm"],
+            texto_secundario_box["altura_cm"],
+            fontes["texto_secundario_max"],
+            fontes["texto_secundario_min"],
+            alinhamento=1,
+            max_linhas=template["texto_secundario"]["max_linhas"],
+        )
+        secundario.wrapOn(
+            c,
+            texto_secundario_box["largura_cm"],
+            texto_secundario_box["altura_cm"],
+        )
+        secundario_y = texto_secundario_box["y_cm"] + (
+            texto_secundario_box["altura_cm"] - secundario_altura
+        ) / 2
+        secundario.drawOn(c, texto_secundario_box["x_cm"], secundario_y)
+
+    c.setFillColor(branco)
+    c.setFont(fontes["familia_base"], fontes["rodape"])
+    c.drawCentredString(
+        cm_value(template["rodape"]["x_centro_cm"]),
+        cm_value(template["rodape"]["y_cm"]),
+        template["rodape"]["texto"],
+    )
+
+    c.showPage()
+    c.save()
+    return str(arquivo_pdf)
+
+
+def montar_resultado_pdf_placa_aviso(
+    comando: dict[str, Any],
+    arquivo_pdf: str,
+    rascunho_origem: Optional[dict[str, Any]] = None,
+) -> dict[str, Any]:
+    textos = extrair_texto_placa_pdf(comando, rascunho_origem)
+    conteudo_variavel = {
+        "titulo_cabecalho": textos["titulo"],
+        "texto_principal": textos["texto_principal"],
+        "texto_secundario": textos["texto_secundario"],
+        "descricao_pictograma": textos["descricao_pictograma"] or None,
+        "local_instalacao_sugerido": textos["local_instalacao_sugerido"] or None,
+        "tipo_placa": textos["tipo_placa"] or None,
+        "tema_placa": textos["tema_placa"] or None,
+    }
+
+    return {
+        "tipo_resultado": "PDF_PLACA_AVISO_GERADO",
+        "status": "PDF_RASCUNHO_GERADO",
+        "arquivo_pdf": arquivo_pdf,
+        "obra_codigo": comando["obra_codigo"],
+        "agente": "AGENTE_006_COMUNICACAO_VISUAL_OBRA",
+        "template_visual": textos["template_visual"],
+        "template_fixo": montar_template_fixo_placa_aviso(),
+        "conteudo_variavel": conteudo_variavel,
+        "titulo_cabecalho": conteudo_variavel["titulo_cabecalho"],
+        "texto_principal": conteudo_variavel["texto_principal"],
+        "texto_secundario": conteudo_variavel["texto_secundario"],
+        "descricao_pictograma": conteudo_variavel["descricao_pictograma"],
+        "local_instalacao_sugerido": conteudo_variavel["local_instalacao_sugerido"],
+        "tipo_placa": conteudo_variavel["tipo_placa"],
+        "tema_placa": conteudo_variavel["tema_placa"],
+        "comando_origem_id": str(comando["id_comando"]),
+        "comando_executivo_id": comando["id"],
+        "comando_rascunho_origem_id": (
+            rascunho_origem.get("id") if rascunho_origem else None
+        ),
+        "id_comando_rascunho_origem": (
+            str(rascunho_origem["id_comando"]) if rascunho_origem else None
+        ),
+        "tipo_comando": comando["tipo_comando"],
+        "gerado_em": datetime.now(timezone.utc).isoformat(),
+        "observacao_validacao": (
+            "PDF local de rascunho não oficial. Não afirma conformidade normativa final. "
+            "Validar com responsável técnico/segurança do trabalho antes de uso."
+        ),
+        "controles_operacionais": {
+            "gerou_pdf_real": True,
+            "imprimiu": False,
+            "executou_rpa": False,
+            "conectou_openclaw": False,
+            "alterou_rdo_oficial": False,
+            "enviou_mensagem_terceiros": False,
+            "rascunho_nao_oficial": True,
+        },
+    }
+
+
+def gerar_pdf_teste_local_placa_aviso(
+    conteudo: Optional[str] = None,
+    obra_codigo: str = "OBRA-CAIO",
+) -> dict[str, Any]:
+    """Helper de desenvolvimento local: não acessa banco, Telegram ou comandos_executivos."""
+    comando_rascunho = {
+        "id": 0,
+        "id_comando": uuid.uuid4(),
+        "correlation_id": uuid.uuid4(),
+        "obra_codigo": obra_codigo,
+        "tipo_comando": "PREPARAR_PLACA_AVISO",
+        "payload_comando": {
+            "entrada": {
+                "conteudo": conteudo
+                or (
+                    "Cabeçalho: Atenção\n"
+                    "Frase principal: Obrigatório uso de EPI\n"
+                    "Frase inferior: Use capacete, bota e colete nesta área.\n"
+                    "Pictograma: trabalhador usando capacete, bota e colete\n"
+                    "Local: entrada da obra\n"
+                    "Tipo: obrigatório\n"
+                    "Tema: EPI"
+                )
+            }
+        },
+    }
+    resultado_rascunho = montar_resultado_agente_comunicacao_obra(comando_rascunho)
+    comando_pdf = {
+        **comando_rascunho,
+        "id": 0,
+        "id_comando": uuid.uuid4(),
+        "tipo_comando": "GERAR_PDF_PLACA_AVISO",
+    }
+    rascunho_origem = {
+        "id": None,
+        "id_comando": comando_rascunho["id_comando"],
+        "resultado": resultado_rascunho,
+    }
+    arquivo_pdf = gerar_pdf_local_placa_aviso(comando_pdf, rascunho_origem)
+    resultado_pdf = montar_resultado_pdf_placa_aviso(
+        comando_pdf,
+        arquivo_pdf,
+        rascunho_origem,
+    )
+    return {
+        "rascunho": resultado_rascunho,
+        "pdf": resultado_pdf,
+    }
 
 
 def ensure_core_tables() -> None:
@@ -1975,6 +2711,238 @@ async def processar_comando_agente_comunicacao_obra(
         ),
         "acoes_externas_executadas": False,
         "message": "Comando AGENTE_006_COMUNICACAO_VISUAL_OBRA processado sem ações externas.",
+    }
+
+
+@app.post("/agentes/comunicacao-obra/gerar-pdf-placa")
+async def gerar_pdf_placa_agente_comunicacao_obra(
+    payload: Optional[ProcessarComandoComunicacaoObraRequest] = None,
+):
+    id_comando = payload.id_comando if payload else None
+    if id_comando:
+        try:
+            id_comando = str(uuid.UUID(id_comando))
+        except ValueError as exc:
+            raise HTTPException(
+                status_code=422,
+                detail={
+                    "message": "id_comando inválido. Use um UUID válido.",
+                    "error": str(exc),
+                },
+            )
+
+    select_comando_sql = """
+    SELECT
+        ce.id,
+        ce.id_comando,
+        ce.tenant_id,
+        ce.obra_codigo,
+        ce.correlation_id,
+        ce.agente_origem,
+        ce.agente_destino,
+        ce.tipo_comando,
+        ce.payload_comando,
+        ce.status,
+        ce.requer_aprovacao,
+        ce.criado_em,
+        ce.atualizado_em,
+        et.chat_id,
+        et.telegram_user_id,
+        et.telegram_message_id
+    FROM comandos_executivos AS ce
+    LEFT JOIN eventos_telegram AS et
+        ON et.id = ce.evento_telegram_id
+    WHERE ce.agente_destino = 'AGENTE_006_COMUNICACAO_VISUAL_OBRA'
+      AND ce.tipo_comando = 'GERAR_PDF_PLACA_AVISO'
+      AND ce.status = 'APROVADO'
+      AND (%(id_comando)s::uuid IS NULL OR ce.id_comando = %(id_comando)s::uuid)
+    ORDER BY ce.aprovado_em NULLS LAST, ce.criado_em
+    LIMIT 1
+    FOR UPDATE OF ce;
+    """
+
+    select_rascunho_origem_sql = """
+    SELECT
+        ce.id,
+        ce.id_comando,
+        ce.resultado,
+        ce.criado_em,
+        ce.atualizado_em
+    FROM comandos_executivos AS ce
+    WHERE ce.agente_destino = 'AGENTE_006_COMUNICACAO_VISUAL_OBRA'
+      AND ce.tipo_comando = 'PREPARAR_PLACA_AVISO'
+      AND ce.status = 'CONCLUIDO'
+      AND ce.resultado->>'tipo_resultado' = 'RASCUNHO_PLACA_AVISO'
+      AND ce.obra_codigo = %(obra_codigo)s
+      AND (
+          ce.criado_em <= %(comando_pdf_criado_em)s
+          OR ce.atualizado_em <= %(comando_pdf_criado_em)s
+      )
+    ORDER BY
+        CASE
+            WHEN ce.atualizado_em <= %(comando_pdf_criado_em)s THEN ce.atualizado_em
+            ELSE ce.criado_em
+        END DESC,
+        ce.criado_em DESC
+    LIMIT 1;
+    """
+
+    update_resultado_evidencias_sql = """
+    UPDATE comandos_executivos
+    SET resultado = %(resultado)s,
+        evidencias = COALESCE(evidencias, '[]'::jsonb) || %(evidencia)s::jsonb,
+        executado_por = 'AGENTE_006_COMUNICACAO_VISUAL_OBRA',
+        executado_em = NOW(),
+        mensagem_erro = NULL,
+        atualizado_em = NOW()
+    WHERE id = %(id)s
+      AND status = 'APROVADO'
+      AND tipo_comando = 'GERAR_PDF_PLACA_AVISO'
+    RETURNING id;
+    """
+
+    update_status_sql = """
+    UPDATE comandos_executivos
+    SET status = 'CONCLUIDO',
+        atualizado_em = NOW()
+    WHERE id = %(id)s
+      AND status = 'APROVADO'
+      AND tipo_comando = 'GERAR_PDF_PLACA_AVISO'
+      AND resultado IS NOT NULL
+    RETURNING id, id_comando, status, resultado;
+    """
+
+    try:
+        conn = get_db_connection()
+        try:
+            with conn.cursor() as cur:
+                cur.execute(select_comando_sql, {"id_comando": id_comando})
+                row = cur.fetchone()
+
+                if row is None:
+                    conn.rollback()
+                    return {
+                        "ok": True,
+                        "processado": False,
+                        "comando_executivo_id": None,
+                        "arquivo_pdf": None,
+                        "tipo_resultado": None,
+                        "mensagem_resposta_executiva": (
+                            "Nenhum comando APROVADO GERAR_PDF_PLACA_AVISO para "
+                            "AGENTE_006_COMUNICACAO_VISUAL_OBRA encontrado."
+                        ),
+                        "acoes_externas_executadas": False,
+                    }
+
+                comando = {
+                    "id": row[0],
+                    "id_comando": row[1],
+                    "tenant_id": row[2],
+                    "obra_codigo": row[3],
+                    "correlation_id": row[4],
+                    "agente_origem": row[5],
+                    "agente_destino": row[6],
+                    "tipo_comando": row[7],
+                    "payload_comando": row[8],
+                    "status": row[9],
+                    "requer_aprovacao": row[10],
+                    "criado_em": row[11],
+                    "atualizado_em": row[12],
+                    "telegram_chat_id": row[13],
+                    "telegram_user_id": row[14],
+                    "telegram_message_id": row[15],
+                }
+
+                cur.execute(
+                    select_rascunho_origem_sql,
+                    {
+                        "obra_codigo": comando["obra_codigo"],
+                        "comando_pdf_criado_em": comando["criado_em"],
+                    },
+                )
+                rascunho_row = cur.fetchone()
+                rascunho_origem = None
+                if rascunho_row is not None:
+                    rascunho_origem = {
+                        "id": rascunho_row[0],
+                        "id_comando": rascunho_row[1],
+                        "resultado": rascunho_row[2],
+                        "criado_em": rascunho_row[3],
+                        "atualizado_em": rascunho_row[4],
+                    }
+
+                arquivo_pdf = gerar_pdf_local_placa_aviso(comando, rascunho_origem)
+                resultado = montar_resultado_pdf_placa_aviso(
+                    comando,
+                    arquivo_pdf,
+                    rascunho_origem,
+                )
+                evidencia = [
+                    {
+                        "tipo": "ARQUIVO_PDF_PLACA_AVISO",
+                        "arquivo_pdf": arquivo_pdf,
+                        "gerado_em": resultado["gerado_em"],
+                        "rascunho_nao_oficial": True,
+                        "comando_rascunho_origem_id": resultado[
+                            "comando_rascunho_origem_id"
+                        ],
+                        "id_comando_rascunho_origem": resultado[
+                            "id_comando_rascunho_origem"
+                        ],
+                    }
+                ]
+
+                cur.execute(
+                    update_resultado_evidencias_sql,
+                    {
+                        "id": comando["id"],
+                        "resultado": Json(resultado),
+                        "evidencia": Json(evidencia),
+                    },
+                )
+                resultado_row = cur.fetchone()
+                if resultado_row is None:
+                    raise RuntimeError("Resultado/evidências do PDF da placa não foram salvos.")
+
+                cur.execute(update_status_sql, {"id": comando["id"]})
+                concluido_row = cur.fetchone()
+                if concluido_row is None:
+                    raise RuntimeError(
+                        "Status do comando GERAR_PDF_PLACA_AVISO não foi atualizado para CONCLUIDO."
+                    )
+
+            conn.commit()
+
+        except Exception:
+            conn.rollback()
+            raise
+
+        finally:
+            conn.close()
+
+    except Exception as exc:
+        raise HTTPException(
+            status_code=500,
+            detail={
+                "message": "Erro ao gerar PDF local de placa de aviso pelo Agente 006.",
+                "error": str(exc),
+            },
+        )
+
+    tipo_resultado = concluido_row[3].get("tipo_resultado")
+    return {
+        "ok": True,
+        "processado": True,
+        "comando_executivo_id": concluido_row[0],
+        "id_comando": str(concluido_row[1]),
+        "status_comando": concluido_row[2],
+        "arquivo_pdf": concluido_row[3].get("arquivo_pdf"),
+        "tipo_resultado": tipo_resultado,
+        "mensagem_resposta_executiva": montar_mensagem_resposta_executiva_comunicacao_obra(
+            comando["obra_codigo"],
+            tipo_resultado,
+        ),
+        "acoes_externas_executadas": False,
     }
 
 

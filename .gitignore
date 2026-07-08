@@ -123,3 +123,6 @@ docs/comandos.txt
 
 .DS_Store
 Thumbs.db
+
+# Artefatos gerados localmente
+outputs/
