@@ -355,6 +355,52 @@ def classificar_intencao_executiva(conteudo: Optional[str]) -> dict[str, Any]:
     ]
     menciona_placa = has_any_term(texto, termos_placa)
 
+    comandos_documentos_resumo = [
+        "documentos",
+        "documentos da obra",
+        "resumo documentos",
+        "resumo dos documentos",
+        "quais documentos temos",
+        "listar documentos da obra",
+    ]
+    texto_comando = re.sub(r"\s+", " ", texto.strip().rstrip("?.!"))
+    if texto_comando in comandos_documentos_resumo:
+        return {
+            "intencao": "CONSULTAR_DOCUMENTOS_OBRA_RESUMO",
+            "agente_destino": "AGENTE_008_GESTAO_OPERACIONAL_OBRA",
+            "tipo_comando": "CONSULTAR_DOCUMENTOS_OBRA_RESUMO",
+            "requer_aprovacao": False,
+            "confianca": 0.95,
+            "justificativa": "Consulta somente leitura do resumo documental indexado da obra.",
+        }
+
+    comandos_documentos_indexados = [
+        "documentos arquitetura",
+        "documentos eletrica",
+        "documentos elétrica",
+        "documentos hidraulica",
+        "documentos hidráulica",
+        "documentos estrutura",
+        "documentos luminotecnico",
+        "documentos luminotécnico",
+        "documentos dwg",
+        "documentos pdf",
+        "buscar refeitório",
+        "buscar alteracoes refeitório",
+        "buscar alterações refeitório",
+        "procurar refeitório",
+        "procurar projeto refeitório",
+    ]
+    if texto_comando in comandos_documentos_indexados:
+        return {
+            "intencao": "CONSULTAR_DOCUMENTOS_OBRA_INDEXADOS",
+            "agente_destino": "AGENTE_008_GESTAO_OPERACIONAL_OBRA",
+            "tipo_comando": "CONSULTAR_DOCUMENTOS_OBRA_INDEXADOS",
+            "requer_aprovacao": False,
+            "confianca": 0.95,
+            "justificativa": "Busca somente leitura no índice documental da obra.",
+        }
+
     if has_any_term(texto, ["confirmar", "confirmo", "aprovado", "aprovar"]):
         return {
             "intencao": "CONFIRMAR_COMANDO",
@@ -628,6 +674,104 @@ AGENTE_008_SEGURANCA_CONSULTA = {
     "altera_rdo_oficial": False,
     "envia_terceiros": False,
 }
+
+
+def extrair_filtros_documentos_telegram(conteudo: Optional[str]) -> dict[str, Optional[str]]:
+    texto = re.sub(r"\s+", " ", (conteudo or "").lower().strip().rstrip("?.!"))
+    disciplina = None
+    for termo, valor in (
+        ("arquitetura", "arquitetura"),
+        ("eletrica", "eletrica"),
+        ("elétrica", "eletrica"),
+        ("hidraulica", "hidraulica"),
+        ("hidráulica", "hidraulica"),
+        ("estrutura", "estrutura"),
+        ("luminotecnico", "luminotecnico"),
+        ("luminotécnico", "luminotecnico"),
+    ):
+        if termo in texto:
+            disciplina = valor
+            break
+
+    extensao = next((item for item in ("dwg", "pdf") if item in texto.split()), None)
+    termo = "refeitório" if "refeitório" in texto else None
+    return {"disciplina": disciplina, "extensao": extensao, "termo": termo}
+
+
+def montar_resposta_documentos_resumo_telegram(obra_codigo: str) -> str:
+    with get_db_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT COUNT(*)
+                FROM documentos_minio_obra
+                WHERE obra_codigo = %(obra_codigo)s;
+                """,
+                {"obra_codigo": obra_codigo},
+            )
+            total = cur.fetchone()[0]
+            cur.execute(
+                """
+                SELECT COALESCE(disciplina_original, 'Sem disciplina'), COUNT(*)
+                FROM documentos_minio_obra
+                WHERE obra_codigo = %(obra_codigo)s
+                GROUP BY disciplina_original
+                ORDER BY COUNT(*) DESC, disciplina_original NULLS LAST
+                LIMIT 8;
+                """,
+                {"obra_codigo": obra_codigo},
+            )
+            disciplinas = cur.fetchall()
+
+    if not total:
+        return "Não encontrei documentos para esse filtro."
+    linhas = [f"Documentos da {obra_codigo}: {total} indexados."]
+    linhas.extend(f"• {disciplina}: {quantidade}" for disciplina, quantidade in disciplinas)
+    return "\n".join(linhas)
+
+
+def montar_resposta_documentos_indexados_telegram(
+    obra_codigo: str, conteudo: Optional[str], limite: int = 10
+) -> str:
+    filtros = extrair_filtros_documentos_telegram(conteudo)
+    filtros_sql = ["obra_codigo = %(obra_codigo)s"]
+    params: dict[str, Any] = {"obra_codigo": obra_codigo, "limite_consulta": limite + 1}
+    if filtros["disciplina"]:
+        filtros_sql.append(
+            "TRANSLATE(LOWER(disciplina_original), "
+            "'áàâãéêíóôõúüç', 'aaaaeeiooouuc') LIKE %(disciplina)s"
+        )
+        params["disciplina"] = f"%{filtros['disciplina']}%"
+    if filtros["extensao"]:
+        filtros_sql.append("LOWER(extensao) = %(extensao)s")
+        params["extensao"] = filtros["extensao"]
+    if filtros["termo"]:
+        filtros_sql.append("(nome_arquivo ILIKE %(termo)s OR object_key ILIKE %(termo)s)")
+        params["termo"] = f"%{filtros['termo']}%"
+
+    sql = f"""
+        SELECT nome_arquivo, disciplina_original, extensao, bucket, object_key
+        FROM documentos_minio_obra
+        WHERE {" AND ".join(filtros_sql)}
+        ORDER BY atualizado_em DESC NULLS LAST, criado_em DESC NULLS LAST, id DESC
+        LIMIT %(limite_consulta)s;
+    """
+    with get_db_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(sql, params)
+            documentos = cur.fetchall()
+
+    if not documentos:
+        return "Não encontrei documentos para esse filtro."
+    linhas = [f"Documentos encontrados na {obra_codigo}:"]
+    for nome, disciplina, extensao, bucket, object_key in documentos[:limite]:
+        linhas.append(
+            f"• {nome}\n  {disciplina or 'Sem disciplina'} | {extensao or 'sem extensão'}\n"
+            f"  s3://{bucket}/{object_key}"
+        )
+    if len(documentos) > limite:
+        linhas.append("Mostrando os 10 primeiros resultados.")
+    return "\n".join(linhas)
 
 
 def serialize_date(value: Any) -> Optional[str]:
@@ -2467,9 +2611,14 @@ async def receber_entrada_telegram(
             "justificativa": "Usuário não autorizado; comando registrado apenas para auditoria.",
         }
 
+    intencao_documental = classificacao["intencao"] in {
+        "CONSULTAR_DOCUMENTOS_OBRA_RESUMO",
+        "CONSULTAR_DOCUMENTOS_OBRA_INDEXADOS",
+    }
+    obra_codigo = payload.obra_codigo or ("OBRA-001" if intencao_documental else "OBRA-CAIO")
     normalized = {
         "tenant_id": payload.tenant_id or "construtora-piloto",
-        "obra_codigo": payload.obra_codigo or "OBRA-CAIO",
+        "obra_codigo": obra_codigo,
         "canal": "telegram",
         "telegram_update_id": payload.telegram_update_id,
         "telegram_message_id": payload.telegram_message_id,
@@ -2932,6 +3081,8 @@ async def receber_entrada_telegram(
                     "entrada": normalized,
                     "classificacao": classificacao,
                 }
+                if intencao_documental:
+                    payload_comando.update(AGENTE_008_SEGURANCA_CONSULTA)
 
                 cur.execute(
                     insert_comando_sql,
@@ -2997,6 +3148,14 @@ async def receber_entrada_telegram(
             "Usuário não autorizado para comandos executivos. "
             "Solicitação registrada para auditoria; nenhum comando foi alterado."
         )
+    elif classificacao["intencao"] == "CONSULTAR_DOCUMENTOS_OBRA_RESUMO":
+        mensagem_resposta_executiva = montar_resposta_documentos_resumo_telegram(
+            normalized["obra_codigo"]
+        )
+    elif classificacao["intencao"] == "CONSULTAR_DOCUMENTOS_OBRA_INDEXADOS":
+        mensagem_resposta_executiva = montar_resposta_documentos_indexados_telegram(
+            normalized["obra_codigo"], normalized["conteudo"]
+        )
 
     return {
         "ok": True,
@@ -3023,6 +3182,7 @@ async def receber_entrada_telegram(
         "telegram_user_id": normalized["telegram_user_id"],
         "telegram_message_id": normalized["telegram_message_id"],
         "mensagem_resposta_executiva": mensagem_resposta_executiva,
+        **(AGENTE_008_SEGURANCA_CONSULTA if intencao_documental else {}),
         "acoes_externas_executadas": False,
         "next_action": "COMANDO_AUDITAVEL_REGISTRADO_SEM_EXECUCAO_EXTERNA",
         "message": "Entrada Telegram registrada e classificada sem integrações externas.",
