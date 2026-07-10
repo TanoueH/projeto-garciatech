@@ -188,6 +188,18 @@ class GestaoOperacionalAreaRequest(BaseModel):
     codigo_area: str
 
 
+class GestaoOperacionalDocumentosResumoRequest(BaseModel):
+    obra_codigo: str
+
+
+class GestaoOperacionalDocumentosIndexadosRequest(BaseModel):
+    obra_codigo: str
+    disciplina: str | None = None
+    extensao: str | None = None
+    termo: str | None = None
+    limite: int = Field(default=50, ge=1, le=200)
+
+
 def get_db_connection():
     if not DATABASE_URL:
         raise RuntimeError("DATABASE_URL não definida.")
@@ -2121,6 +2133,151 @@ def area_status_gestao_operacional(payload: GestaoOperacionalAreaRequest):
             for status in ("ABERTA", "EM_TRATAMENTO", "BLOQUEANTE")
         ),
         "atividades": atividades,
+    }
+
+
+@app.post("/agentes/gestao-operacional/documentos-resumo")
+def documentos_resumo_gestao_operacional(
+    payload: GestaoOperacionalDocumentosResumoRequest,
+):
+    try:
+        with get_db_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT
+                        disciplina_original,
+                        extensao,
+                        categoria_documental,
+                        COUNT(*) AS total
+                    FROM documentos_minio_obra
+                    WHERE obra_codigo = %(obra_codigo)s
+                    GROUP BY disciplina_original, extensao, categoria_documental
+                    ORDER BY
+                        disciplina_original NULLS LAST,
+                        extensao NULLS LAST,
+                        categoria_documental NULLS LAST;
+                    """,
+                    {"obra_codigo": payload.obra_codigo},
+                )
+                resumo = [
+                    {
+                        "disciplina_original": row[0],
+                        "extensao": row[1],
+                        "categoria_documental": row[2],
+                        "total": row[3],
+                    }
+                    for row in cur.fetchall()
+                ]
+    except Exception as exc:
+        raise HTTPException(
+            status_code=500,
+            detail={
+                "message": "Erro ao consultar resumo de documentos indexados da obra.",
+                "error": str(exc),
+            },
+        )
+
+    return {
+        "ok": True,
+        "agente": "AGENTE_008_GESTAO_OPERACIONAL_OBRA",
+        "mvp": "0.6E",
+        "descricao": "Resumo consultivo de documentos indexados no MinIO por disciplina, extensão e categoria documental.",
+        "obra_codigo": payload.obra_codigo,
+        **AGENTE_008_SEGURANCA_CONSULTA,
+        "total_documentos": sum(item["total"] for item in resumo),
+        "resumo": resumo,
+    }
+
+
+@app.post("/agentes/gestao-operacional/documentos-indexados")
+def documentos_indexados_gestao_operacional(
+    payload: GestaoOperacionalDocumentosIndexadosRequest,
+):
+    filtros_sql = ["obra_codigo = %(obra_codigo)s"]
+    params: dict[str, Any] = {
+        "obra_codigo": payload.obra_codigo,
+        "limite": payload.limite,
+    }
+
+    disciplina = payload.disciplina.strip() if payload.disciplina else None
+    extensao = payload.extensao.strip().lower() if payload.extensao else None
+    termo = payload.termo.strip() if payload.termo else None
+
+    if disciplina:
+        filtros_sql.append("disciplina_original ILIKE %(disciplina)s")
+        params["disciplina"] = f"%{disciplina}%"
+
+    if extensao:
+        filtros_sql.append("LOWER(extensao) = %(extensao)s")
+        params["extensao"] = extensao
+
+    if termo:
+        filtros_sql.append("(nome_arquivo ILIKE %(termo)s OR object_key ILIKE %(termo)s)")
+        params["termo"] = f"%{termo}%"
+
+    sql = f"""
+    SELECT
+        id,
+        bucket,
+        object_key,
+        nome_arquivo,
+        extensao,
+        pasta_origem,
+        disciplina_original,
+        categoria_documental,
+        status_indexacao,
+        manifest_path
+    FROM documentos_minio_obra
+    WHERE {" AND ".join(filtros_sql)}
+    ORDER BY atualizado_em DESC NULLS LAST, criado_em DESC NULLS LAST, id DESC
+    LIMIT %(limite)s;
+    """
+
+    try:
+        with get_db_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(sql, params)
+                documentos = [
+                    {
+                        "id": row[0],
+                        "bucket": row[1],
+                        "object_key": row[2],
+                        "nome_arquivo": row[3],
+                        "extensao": row[4],
+                        "pasta_origem": row[5],
+                        "disciplina_original": row[6],
+                        "categoria_documental": row[7],
+                        "status_indexacao": row[8],
+                        "manifest_path": row[9],
+                        "minio_uri": f"s3://{row[1]}/{row[2]}",
+                    }
+                    for row in cur.fetchall()
+                ]
+    except Exception as exc:
+        raise HTTPException(
+            status_code=500,
+            detail={
+                "message": "Erro ao consultar documentos indexados da obra.",
+                "error": str(exc),
+            },
+        )
+
+    return {
+        "ok": True,
+        "agente": "AGENTE_008_GESTAO_OPERACIONAL_OBRA",
+        "mvp": "0.6E",
+        "descricao": "Consulta controlada de documentos indexados no MinIO, sem download ou alteração de arquivos.",
+        "obra_codigo": payload.obra_codigo,
+        "filtros": {
+            "disciplina": disciplina,
+            "extensao": extensao,
+            "termo": termo,
+            "limite": payload.limite,
+        },
+        **AGENTE_008_SEGURANCA_CONSULTA,
+        "total_retornado": len(documentos),
+        "documentos": documentos,
     }
 
 
