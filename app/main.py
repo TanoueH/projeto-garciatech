@@ -179,6 +179,10 @@ class ProcessarComandoComunicacaoObraRequest(BaseModel):
     id_comando: Optional[str] = None
 
 
+class ProcessarComandoGestaoOperacionalRequest(BaseModel):
+    id_comando: Optional[str] = None
+
+
 class GestaoOperacionalObraRequest(BaseModel):
     obra_codigo: str
 
@@ -2425,6 +2429,271 @@ def documentos_indexados_gestao_operacional(
     }
 
 
+def _filtros_comando_documental(payload_comando: Any) -> dict[str, Any]:
+    payload = payload_comando if isinstance(payload_comando, dict) else {}
+    filtros = payload.get("filtros") if isinstance(payload.get("filtros"), dict) else {}
+    entrada = payload.get("entrada") if isinstance(payload.get("entrada"), dict) else {}
+    inferidos = extrair_filtros_documentos_telegram(entrada.get("conteudo"))
+
+    def texto_filtro(nome: str) -> Optional[str]:
+        valor = payload.get(nome, filtros.get(nome, inferidos.get(nome)))
+        return valor.strip() if isinstance(valor, str) and valor.strip() else None
+
+    limite_bruto = payload.get("limite", filtros.get("limite", 10))
+    try:
+        limite = int(limite_bruto)
+    except (TypeError, ValueError):
+        limite = 10
+
+    extensao = texto_filtro("extensao")
+    return {
+        "disciplina": texto_filtro("disciplina"),
+        "extensao": extensao.lower() if extensao else None,
+        "termo": texto_filtro("termo"),
+        "limite": max(1, min(limite, 10)),
+    }
+
+
+def _resultado_resumo_documental(cur: Any, obra_codigo: str) -> dict[str, Any]:
+    cur.execute(
+        """
+        SELECT
+            COALESCE(disciplina_original, 'Sem disciplina') AS disciplina_original,
+            COALESCE(NULLIF(extensao, ''), 'sem extensão') AS extensao,
+            COUNT(*) AS total
+        FROM documentos_minio_obra
+        WHERE obra_codigo = %(obra_codigo)s
+        GROUP BY disciplina_original, extensao
+        ORDER BY total DESC, disciplina_original, extensao;
+        """,
+        {"obra_codigo": obra_codigo},
+    )
+    resumo = [
+        {"disciplina_original": row[0], "extensao": row[1], "total": row[2]}
+        for row in cur.fetchall()
+    ]
+    total_documentos = sum(item["total"] for item in resumo)
+    totais_disciplina: dict[str, int] = {}
+    for item in resumo:
+        disciplina = item["disciplina_original"]
+        totais_disciplina[disciplina] = totais_disciplina.get(disciplina, 0) + item["total"]
+
+    linhas = [
+        f"📁 Documentos da {obra_codigo}",
+        "",
+        f"Total indexado: {total_documentos} documentos",
+    ]
+    if totais_disciplina:
+        linhas.extend(["", "Resumo por disciplina:"])
+        linhas.extend(
+            f"- {disciplina}: {total}"
+            for disciplina, total in sorted(
+                totais_disciplina.items(), key=lambda item: (-item[1], item[0])
+            )
+        )
+
+    return {
+        "tipo_resultado": "RESUMO_DOCUMENTOS_OBRA",
+        "resposta_telegram": "\n".join(linhas),
+        "total_documentos": total_documentos,
+        "resumo": resumo,
+        **AGENTE_008_SEGURANCA_CONSULTA,
+    }
+
+
+def _resultado_documentos_indexados(
+    cur: Any, obra_codigo: str, payload_comando: Any
+) -> dict[str, Any]:
+    filtros = _filtros_comando_documental(payload_comando)
+    filtros_sql = ["obra_codigo = %(obra_codigo)s"]
+    params: dict[str, Any] = {
+        "obra_codigo": obra_codigo,
+        "limite_consulta": 11,
+    }
+    if filtros["disciplina"]:
+        filtros_sql.append("disciplina_original ILIKE %(disciplina)s")
+        params["disciplina"] = f"%{filtros['disciplina']}%"
+    if filtros["extensao"]:
+        filtros_sql.append("LOWER(extensao) = %(extensao)s")
+        params["extensao"] = filtros["extensao"]
+    if filtros["termo"]:
+        filtros_sql.append("(nome_arquivo ILIKE %(termo)s OR object_key ILIKE %(termo)s)")
+        params["termo"] = f"%{filtros['termo']}%"
+
+    cur.execute(
+        f"""
+        SELECT nome_arquivo, disciplina_original, extensao, bucket, object_key
+        FROM documentos_minio_obra
+        WHERE {" AND ".join(filtros_sql)}
+        ORDER BY atualizado_em DESC NULLS LAST, criado_em DESC NULLS LAST, id DESC
+        LIMIT %(limite_consulta)s;
+        """,
+        params,
+    )
+    rows = cur.fetchall()
+    ha_mais_resultados = len(rows) > 10
+    documentos = [
+        {
+            "nome_arquivo": row[0],
+            "disciplina_original": row[1],
+            "extensao": row[2],
+            "minio_uri": f"s3://{row[3]}/{row[4]}",
+        }
+        for row in rows[: filtros["limite"]]
+    ]
+
+    if not documentos:
+        resposta = "Não encontrei documentos para esse filtro."
+    else:
+        linhas = [f"📁 Documentos encontrados na {obra_codigo}", ""]
+        for documento in documentos:
+            linhas.extend(
+                [
+                    f"- {documento['nome_arquivo']}",
+                    f"  {documento['disciplina_original'] or 'Sem disciplina'} | "
+                    f"{documento['extensao'] or 'sem extensão'}",
+                    f"  {documento['minio_uri']}",
+                ]
+            )
+        if ha_mais_resultados:
+            linhas.extend(["", "Mostrando os 10 primeiros resultados."])
+        resposta = "\n".join(linhas)
+
+    return {
+        "tipo_resultado": "DOCUMENTOS_OBRA_INDEXADOS",
+        "resposta_telegram": resposta,
+        "total_retornado": len(documentos),
+        "documentos": documentos,
+        "filtros": filtros,
+        "ha_mais_resultados": ha_mais_resultados,
+        **AGENTE_008_SEGURANCA_CONSULTA,
+    }
+
+
+@app.post("/agentes/gestao-operacional/processar-comando")
+def processar_comando_agente_gestao_operacional(
+    payload: Optional[ProcessarComandoGestaoOperacionalRequest] = None,
+):
+    id_comando = payload.id_comando if payload else None
+    if id_comando:
+        try:
+            id_comando = str(uuid.UUID(id_comando))
+        except ValueError as exc:
+            raise HTTPException(
+                status_code=422,
+                detail={"message": "id_comando inválido. Use um UUID válido.", "error": str(exc)},
+            )
+
+    comando: Optional[dict[str, Any]] = None
+    try:
+        conn = get_db_connection()
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT ce.id, ce.id_comando, ce.obra_codigo, ce.tipo_comando,
+                           ce.payload_comando, et.chat_id
+                    FROM comandos_executivos AS ce
+                    LEFT JOIN eventos_telegram AS et ON et.id = ce.evento_telegram_id
+                    WHERE ce.agente_destino = 'AGENTE_008_GESTAO_OPERACIONAL_OBRA'
+                      AND ce.tipo_comando IN (
+                          'CONSULTAR_DOCUMENTOS_OBRA_RESUMO',
+                          'CONSULTAR_DOCUMENTOS_OBRA_INDEXADOS'
+                      )
+                      AND ce.status = 'PENDENTE'
+                      AND (%(id_comando)s::uuid IS NULL OR ce.id_comando = %(id_comando)s::uuid)
+                    ORDER BY ce.criado_em, ce.id
+                    LIMIT 1
+                    FOR UPDATE OF ce;
+                    """,
+                    {"id_comando": id_comando},
+                )
+                row = cur.fetchone()
+                if row is None:
+                    conn.rollback()
+                    return {
+                        "ok": True,
+                        "agente": "AGENTE_008_GESTAO_OPERACIONAL_OBRA",
+                        "mvp": "0.6F",
+                        "status": "SEM_COMANDO_PENDENTE",
+                        "message": (
+                            "Nenhum comando PENDENTE para "
+                            "AGENTE_008_GESTAO_OPERACIONAL_OBRA encontrado."
+                        ),
+                    }
+
+                comando = {
+                    "id": row[0],
+                    "id_comando": row[1],
+                    "obra_codigo": row[2],
+                    "tipo_comando": row[3],
+                    "payload_comando": row[4],
+                    "telegram_chat_id": row[5],
+                }
+                if comando["tipo_comando"] == "CONSULTAR_DOCUMENTOS_OBRA_RESUMO":
+                    resultado = _resultado_resumo_documental(cur, comando["obra_codigo"])
+                else:
+                    resultado = _resultado_documentos_indexados(
+                        cur, comando["obra_codigo"], comando["payload_comando"]
+                    )
+
+                cur.execute(
+                    """
+                    UPDATE comandos_executivos
+                    SET status = 'CONCLUIDO',
+                        executado_por = 'AGENTE_008_GESTAO_OPERACIONAL_OBRA',
+                        executado_em = NOW(),
+                        resultado = %(resultado)s,
+                        mensagem_erro = NULL,
+                        atualizado_em = NOW()
+                    WHERE id = %(id)s AND status = 'PENDENTE'
+                    RETURNING status;
+                    """,
+                    {"id": comando["id"], "resultado": Json(resultado)},
+                )
+                atualizado = cur.fetchone()
+                if atualizado is None:
+                    raise RuntimeError("Comando não pôde ser atualizado para CONCLUIDO.")
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
+    except Exception as exc:
+        if comando is not None:
+            try:
+                with get_db_connection() as error_conn:
+                    with error_conn.cursor() as error_cur:
+                        error_cur.execute(
+                            """
+                            UPDATE comandos_executivos
+                            SET status = 'ERRO', mensagem_erro = %(erro)s, atualizado_em = NOW()
+                            WHERE id = %(id)s AND status = 'PENDENTE';
+                            """,
+                            {"id": comando["id"], "erro": str(exc)},
+                        )
+            except Exception:
+                pass
+        raise HTTPException(
+            status_code=500,
+            detail={"message": "Erro ao processar consulta documental.", "error": str(exc)},
+        )
+
+    return {
+        "ok": True,
+        "agente": "AGENTE_008_GESTAO_OPERACIONAL_OBRA",
+        "mvp": "0.6F",
+        "status_comando": "CONCLUIDO",
+        "id_comando": str(comando["id_comando"]),
+        "tipo_comando": comando["tipo_comando"],
+        "obra_codigo": comando["obra_codigo"],
+        "telegram_chat_id": comando["telegram_chat_id"],
+        "resposta_telegram": resultado["resposta_telegram"],
+        "resultado": resultado,
+    }
+
+
 @app.post("/webhooks/entrada")
 async def receber_entrada(
     request: Request,
@@ -3083,6 +3352,11 @@ async def receber_entrada_telegram(
                 }
                 if intencao_documental:
                     payload_comando.update(AGENTE_008_SEGURANCA_CONSULTA)
+                    if classificacao["tipo_comando"] == "CONSULTAR_DOCUMENTOS_OBRA_INDEXADOS":
+                        payload_comando.update(
+                            extrair_filtros_documentos_telegram(normalized["conteudo"])
+                        )
+                        payload_comando["limite"] = 10
 
                 cur.execute(
                     insert_comando_sql,
