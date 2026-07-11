@@ -228,6 +228,13 @@ class GestaoOperacionalRelatorioDocumentalRequest(BaseModel):
     limite_amostras: int = Field(default=5, ge=1, le=5)
 
 
+class GestaoOperacionalRiscosDocumentaisRequest(BaseModel):
+    obra_codigo: str
+    area: str | None = None
+    disciplina: str | None = None
+    limite_amostras: int = Field(default=10, ge=1, le=50)
+
+
 class GestaoOperacionalUltimaRevisaoDocumentalRequest(BaseModel):
     obra_codigo: str
     disciplina: str | None = None
@@ -405,6 +412,22 @@ def classificar_intencao_executiva(conteudo: Optional[str]) -> dict[str, Any]:
     ]
     texto_comando = re.sub(r"\s+", " ", texto.strip().rstrip("?.!"))
     texto_comando_normalizado = normalizar_texto_comparacao(texto_comando)
+    comandos_riscos_documentais = {
+        "verificar riscos documentais da obra", "riscos documentais da obra",
+        "documentos criticos para campo", "tem conflito documental no refeitorio",
+        "riscos documentais do refeitorio", "tem projeto obsoleto de luminotecnico",
+        "risco documental luminotecnico", "riscos do projeto hidraulico",
+        "riscos do projeto hidralico", "riscos estrutura", "riscos eletrica",
+    }
+    if texto_comando_normalizado in comandos_riscos_documentais:
+        return {
+            "intencao": "AVALIAR_RISCOS_DOCUMENTAIS_OBRA",
+            "agente_destino": "AGENTE_008_GESTAO_OPERACIONAL_OBRA",
+            "tipo_comando": "AVALIAR_RISCOS_DOCUMENTAIS_OBRA",
+            "requer_aprovacao": False,
+            "confianca": 0.98,
+            "justificativa": "Avaliação consultiva de riscos documentais, sem alteração ou liberação para uso.",
+        }
     if re.fullmatch(
         r"(?:posso usar o |validar |verificar uso |esse )?documento\s+\d+(?:\s+(?:em campo|esta obsoleto|pode ir para campo))?",
         texto_comando_normalizado,
@@ -862,6 +885,32 @@ def extrair_ultima_revisao_telegram(conteudo: Optional[str]) -> dict[str, Any]:
         "area": None,
         "limite_candidatos": 10,
     }
+
+
+def extrair_riscos_documentais_telegram(conteudo: Optional[str]) -> dict[str, Any]:
+    texto = normalizar_texto_comparacao(conteudo)
+    area = None
+    if "sala de jogos" in texto:
+        area = "sala_de_jogos"
+    elif "refeitorio" in texto:
+        area = "refeitorio"
+
+    disciplina = None
+    for termo, valor in (
+        ("luminotecnico", "luminotecnico"),
+        ("hidraulico", "hidraulica"),
+        ("hidraulica", "hidraulica"),
+        ("hidralico", "hidraulica"),
+        ("hidralica", "hidraulica"),
+        ("eletrico", "eletrica"),
+        ("eletrica", "eletrica"),
+        ("estrutural", "estrutura"),
+        ("estrutura", "estrutura"),
+    ):
+        if termo in texto:
+            disciplina = valor
+            break
+    return {"area": area, "disciplina": disciplina, "limite_amostras": 10}
 
 
 def extrair_documento_id_telegram(conteudo: Optional[str]) -> dict[str, int]:
@@ -3024,6 +3073,166 @@ def _gerar_relatorio_documental(
     }
 
 
+def _avaliar_riscos_documentais(
+    cur: Any, obra_codigo: str, area: str | None,
+    disciplina: str | None, limite_amostras: int,
+) -> dict[str, Any]:
+    area_normalizada = normalizar_texto_comparacao(area).replace(" ", "_") if area else None
+    disciplina_normalizada = (
+        normalizar_texto_comparacao(disciplina).replace(" ", "_")
+        if disciplina else None
+    )
+    limite_amostras = max(1, min(limite_amostras, 50))
+    params = {
+        "obra_codigo": obra_codigo, "area": area_normalizada,
+        "disciplina": disciplina_normalizada, "limite": limite_amostras,
+    }
+    filtros = """
+        c.obra_codigo = %(obra_codigo)s
+        AND (%(area)s::text IS NULL OR c.area_detectada = %(area)s::text)
+        AND (%(disciplina)s::text IS NULL OR c.disciplina_detectada = %(disciplina)s::text)
+    """
+    cur.execute(
+        f"""
+        SELECT COUNT(*),
+               COUNT(*) FILTER (WHERE c.eh_obsoleto IS TRUE),
+               COUNT(*) FILTER (WHERE c.eh_as_built IS TRUE),
+               COUNT(*) FILTER (WHERE c.status_revisao = 'ALTERACAO'),
+               COUNT(*) FILTER (WHERE c.status_revisao = 'NAO_IDENTIFICADO' OR c.status_revisao IS NULL),
+               COUNT(*) FILTER (WHERE c.confianca_classificacao < 0.50),
+               COUNT(*) FILTER (WHERE c.data_revisao_detectada IS NOT NULL),
+               COUNT(*) FILTER (WHERE c.data_revisao_detectada IS NULL),
+               COUNT(DISTINCT c.disciplina_detectada) FILTER (WHERE c.disciplina_detectada IS NOT NULL),
+               COUNT(DISTINCT c.area_detectada) FILTER (WHERE c.area_detectada IS NOT NULL)
+        FROM classificacoes_documentais_obra AS c
+        JOIN documentos_minio_obra AS d ON d.id = c.documento_id
+        WHERE {filtros};
+        """,
+        params,
+    )
+    valores = cur.fetchone()
+    chaves = (
+        "total_documentos", "total_obsoletos", "total_as_built", "total_alteracao",
+        "total_sem_revisao", "total_baixa_confianca", "total_com_data_revisao",
+        "total_sem_data_revisao", "total_disciplinas_envolvidas", "total_areas_envolvidas",
+    )
+    totais = dict(zip(chaves, valores))
+    cur.execute(
+        f"""
+        SELECT COUNT(*)
+        FROM (
+            SELECT c.area_detectada, c.disciplina_detectada
+            FROM classificacoes_documentais_obra AS c
+            JOIN documentos_minio_obra AS d ON d.id = c.documento_id
+            WHERE {filtros}
+            GROUP BY c.area_detectada, c.disciplina_detectada
+            HAVING BOOL_OR(c.eh_obsoleto IS TRUE)
+               AND BOOL_OR(c.status_revisao = 'ALTERACAO')
+        ) AS conflitos;
+        """,
+        params,
+    )
+    existe_conflito_mesma_area_disciplina = cur.fetchone()[0] > 0
+
+    def amostra(condicao: str) -> list[dict[str, Any]]:
+        cur.execute(
+            f"""
+            SELECT d.id, d.nome_arquivo, c.area_detectada, c.disciplina_detectada,
+                   c.status_revisao, c.numero_revisao, c.data_revisao_detectada,
+                   c.confianca_classificacao
+            FROM classificacoes_documentais_obra AS c
+            JOIN documentos_minio_obra AS d ON d.id = c.documento_id
+            WHERE {filtros} AND ({condicao})
+            ORDER BY c.confianca_classificacao NULLS FIRST, d.id
+            LIMIT %(limite)s;
+            """,
+            params,
+        )
+        return [{
+            "documento_id": row[0], "nome_arquivo": row[1], "area": row[2],
+            "disciplina": row[3], "status_revisao": row[4], "numero_revisao": row[5],
+            "data_revisao": serialize_date(row[6]),
+            "confianca_classificacao": serialize_numeric(row[7]),
+        } for row in cur.fetchall()]
+
+    amostras = {
+        "documentos_obsoletos_amostra": amostra("c.eh_obsoleto IS TRUE"),
+        "documentos_com_alteracao_amostra": amostra("c.status_revisao = 'ALTERACAO'"),
+        "documentos_sem_revisao_amostra": amostra(
+            "c.status_revisao = 'NAO_IDENTIFICADO' OR c.status_revisao IS NULL"
+        ),
+        "documentos_baixa_confianca_amostra": amostra("c.confianca_classificacao < 0.50"),
+    }
+    alertas = []
+    if existe_conflito_mesma_area_disciplina:
+        alertas.append("Há documentos obsoletos e documentos com alteração na mesma área e disciplina.")
+    if totais["total_obsoletos"]:
+        alertas.append(f"Foram identificados {totais['total_obsoletos']} documentos obsoletos.")
+    if totais["total_sem_revisao"]:
+        alertas.append(f"Há {totais['total_sem_revisao']} documentos sem revisão identificada.")
+    if totais["total_baixa_confianca"]:
+        alertas.append(f"Há {totais['total_baixa_confianca']} classificações com baixa confiança.")
+    if totais["total_sem_data_revisao"]:
+        alertas.append(f"Há {totais['total_sem_data_revisao']} documentos sem data de revisão identificada.")
+    alertas = alertas[:5]
+
+    if not totais["total_documentos"]:
+        nivel = "NAO_AVALIADO"
+    elif existe_conflito_mesma_area_disciplina:
+        nivel = "CRITICO"
+    elif totais["total_obsoletos"] or totais["total_sem_revisao"] >= 10:
+        nivel = "ALTO"
+    elif totais["total_baixa_confianca"] or totais["total_sem_data_revisao"]:
+        nivel = "MEDIO"
+    else:
+        nivel = "BAIXO"
+    recomendacao = (
+        "Não liberar execução em campo sem validação formal da revisão aplicável pelo engenheiro responsável."
+        if totais["total_documentos"] else
+        "Revisar o filtro e confirmar a disponibilidade da classificação documental antes de qualquer decisão em campo."
+    )
+    criticas = []
+    ids_incluidos: set[int] = set()
+    for grupo in (
+        amostras["documentos_obsoletos_amostra"],
+        amostras["documentos_com_alteracao_amostra"],
+        amostras["documentos_sem_revisao_amostra"],
+        amostras["documentos_baixa_confianca_amostra"],
+    ):
+        for documento in grupo:
+            if documento["documento_id"] not in ids_incluidos:
+                ids_incluidos.add(documento["documento_id"])
+                nome = documento["nome_arquivo"] or "Sem nome"
+                nome = nome if len(nome) <= 72 else f"{nome[:69]}..."
+                criticas.append(f"- ID {documento['documento_id']} — {nome}")
+            if len(criticas) == 5:
+                break
+        if len(criticas) == 5:
+            break
+    linhas = [
+        f"⚠️ Riscos documentais — {obra_codigo}", "", "Filtro:",
+        f"Área: {area_normalizada or 'todas'}",
+        f"Disciplina: {disciplina_normalizada or 'todas'}", "", "Resumo:",
+        f"- Total analisado: {totais['total_documentos']} documentos",
+        f"- Obsoletos: {totais['total_obsoletos']}",
+        f"- Com alteração: {totais['total_alteracao']}",
+        f"- Sem revisão identificada: {totais['total_sem_revisao']}",
+        f"- Baixa confiança: {totais['total_baixa_confianca']}", "",
+        "Nível de risco:", nivel, "", "Alertas:",
+    ]
+    linhas.extend(f"- {alerta}" for alerta in (alertas or ["Nenhum alerta relevante identificado no recorte."]))
+    if criticas:
+        linhas.extend(["", "Amostras críticas:", *criticas])
+    linhas.extend(["", "Recomendação:", recomendacao])
+    return {
+        "obra_codigo": obra_codigo, "area": area_normalizada,
+        "disciplina": disciplina_normalizada, "totais": totais, "amostras": amostras,
+        "alertas": alertas, "nivel_risco_documental": nivel,
+        "recomendacao": recomendacao, "resposta_telegram": "\n".join(linhas),
+        **AGENTE_008_SEGURANCA_CONSULTA,
+    }
+
+
 @app.post("/agentes/gestao-operacional/relatorio-documental")
 def relatorio_documental_gestao_operacional(
     payload: GestaoOperacionalRelatorioDocumentalRequest,
@@ -3043,6 +3252,24 @@ def relatorio_documental_gestao_operacional(
             detail={"message": "Erro ao gerar relatório documental da obra.", "error": str(exc)},
         )
     return {"ok": True, "agente": "AGENTE_008_GESTAO_OPERACIONAL_OBRA", "mvp": "0.6J", **resultado}
+
+
+@app.post("/agentes/gestao-operacional/riscos-documentais")
+def riscos_documentais_gestao_operacional(
+    payload: GestaoOperacionalRiscosDocumentaisRequest,
+):
+    try:
+        with get_db_connection() as conn:
+            with conn.cursor() as cur:
+                resultado = _avaliar_riscos_documentais(
+                    cur, payload.obra_codigo, payload.area,
+                    payload.disciplina, payload.limite_amostras,
+                )
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail={
+            "message": "Erro ao avaliar riscos documentais da obra.", "error": str(exc),
+        })
+    return {"ok": True, "agente": "AGENTE_008_GESTAO_OPERACIONAL_OBRA", "mvp": "0.6L", **resultado}
 
 
 @app.post("/agentes/gestao-operacional/ultima-revisao-documental")
@@ -3776,6 +4003,7 @@ def processar_comando_agente_gestao_operacional(
                           'CLASSIFICAR_DOCUMENTOS_OBRA',
                           'CONSULTAR_DOCUMENTOS_CLASSIFICADOS',
                           'GERAR_RELATORIO_DOCUMENTAL_OBRA',
+                          'AVALIAR_RISCOS_DOCUMENTAIS_OBRA',
                           'CONSULTAR_ULTIMA_REVISAO_DOCUMENTAL',
                           'VALIDAR_DOCUMENTO_CAMPO'
                       )
@@ -3830,6 +4058,13 @@ def processar_comando_agente_gestao_operacional(
                         comando["obra_codigo"],
                         bool(payload_relatorio.get("incluir_amostras", True)),
                         int(payload_relatorio.get("limite_amostras", 5)),
+                    )
+                elif comando["tipo_comando"] == "AVALIAR_RISCOS_DOCUMENTAIS_OBRA":
+                    payload_riscos = comando["payload_comando"] or {}
+                    resultado = _avaliar_riscos_documentais(
+                        cur, comando["obra_codigo"], payload_riscos.get("area"),
+                        payload_riscos.get("disciplina"),
+                        int(payload_riscos.get("limite_amostras", 10)),
                     )
                 elif comando["tipo_comando"] == "CONSULTAR_ULTIMA_REVISAO_DOCUMENTAL":
                     payload_revisao = comando["payload_comando"] or {}
@@ -3894,7 +4129,7 @@ def processar_comando_agente_gestao_operacional(
     return {
         "ok": True,
         "agente": "AGENTE_008_GESTAO_OPERACIONAL_OBRA",
-        "mvp": "0.6K",
+        "mvp": "0.6L",
         "status_comando": "CONCLUIDO",
         "id_comando": str(comando["id_comando"]),
         "tipo_comando": comando["tipo_comando"],
@@ -4098,6 +4333,7 @@ async def receber_entrada_telegram(
         "CLASSIFICAR_DOCUMENTOS_OBRA",
         "CONSULTAR_DOCUMENTOS_CLASSIFICADOS",
         "GERAR_RELATORIO_DOCUMENTAL_OBRA",
+        "AVALIAR_RISCOS_DOCUMENTAIS_OBRA",
         "CONSULTAR_ULTIMA_REVISAO_DOCUMENTAL",
         "VALIDAR_DOCUMENTO_CAMPO",
     }
@@ -4594,6 +4830,12 @@ async def receber_entrada_telegram(
                             "obra_codigo": obra_codigo,
                             "incluir_amostras": True,
                             "limite_amostras": 5,
+                        }
+                    elif classificacao["tipo_comando"] == "AVALIAR_RISCOS_DOCUMENTAIS_OBRA":
+                        payload_comando = {
+                            "obra_codigo": obra_codigo,
+                            **extrair_riscos_documentais_telegram(normalized["conteudo"]),
+                            **AGENTE_008_SEGURANCA_CONSULTA,
                         }
                     elif classificacao["tipo_comando"] == "CONSULTAR_ULTIMA_REVISAO_DOCUMENTAL":
                         payload_comando = {
