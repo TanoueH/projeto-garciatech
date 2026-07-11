@@ -13,6 +13,7 @@ COPY requirements-api.txt /app/requirements-api.txt
 RUN pip install --no-cache-dir -r /app/requirements-api.txt
 
 COPY app /app/app
+COPY scripts/telegram /app/scripts/telegram
 
 EXPOSE 8000
 
