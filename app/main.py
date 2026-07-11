@@ -368,6 +368,18 @@ def classificar_intencao_executiva(conteudo: Optional[str]) -> dict[str, Any]:
         "listar documentos da obra",
     ]
     texto_comando = re.sub(r"\s+", " ", texto.strip().rstrip("?.!"))
+    if re.fullmatch(
+        r"(?:analisar|resumir|verificar)\s+(?:documento|projeto)\s+.+",
+        texto_comando,
+    ):
+        return {
+            "intencao": "ANALISAR_DOCUMENTO_OBRA",
+            "agente_destino": "AGENTE_008_GESTAO_OPERACIONAL_OBRA",
+            "tipo_comando": "ANALISAR_DOCUMENTO_OBRA",
+            "requer_aprovacao": False,
+            "confianca": 0.96,
+            "justificativa": "Análise preliminar, somente leitura, de documento indexado da obra.",
+        }
     if texto_comando in comandos_documentos_resumo:
         return {
             "intencao": "CONSULTAR_DOCUMENTOS_OBRA_RESUMO",
@@ -678,6 +690,21 @@ AGENTE_008_SEGURANCA_CONSULTA = {
     "altera_rdo_oficial": False,
     "envia_terceiros": False,
 }
+
+
+def extrair_alvo_analise_documental(conteudo: Optional[str]) -> dict[str, Any]:
+    texto = re.sub(r"\s+", " ", (conteudo or "").strip().rstrip("?.!"))
+    correspondencia = re.fullmatch(
+        r"(?:analisar|resumir|verificar)\s+(?:documento|projeto)\s+(.+)",
+        texto,
+        flags=re.IGNORECASE,
+    )
+    if not correspondencia:
+        return {}
+    alvo = correspondencia.group(1).strip()
+    if alvo.isdigit():
+        return {"documento_id": int(alvo)}
+    return {"termo": alvo}
 
 
 def extrair_filtros_documentos_telegram(conteudo: Optional[str]) -> dict[str, Optional[str]]:
@@ -2570,6 +2597,246 @@ def _resultado_documentos_indexados(
     }
 
 
+LIMITE_PDF_PAGINAS = 5
+LIMITE_PDF_CARACTERES = 12_000
+LIMITE_DOWNLOAD_ANALISE_BYTES = 25 * 1024 * 1024
+LIMITE_RESPOSTA_TELEGRAM = 3_000
+PASTA_TEMPORARIA_ANALISE = Path("/tmp/agente_008_documentos")
+
+
+def _buscar_documento_para_analise(
+    cur: Any, obra_codigo: str, payload_comando: Any
+) -> Optional[dict[str, Any]]:
+    payload = payload_comando if isinstance(payload_comando, dict) else {}
+    documento_id = payload.get("documento_id")
+    termo = payload.get("termo")
+    if documento_id is not None:
+        try:
+            documento_id = int(documento_id)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("documento_id deve ser um número inteiro.") from exc
+        cur.execute(
+            """
+            SELECT id, bucket, object_key, nome_arquivo, extensao,
+                   disciplina_original, categoria_documental
+            FROM documentos_minio_obra
+            WHERE id = %(documento_id)s AND obra_codigo = %(obra_codigo)s
+            LIMIT 1;
+            """,
+            {"documento_id": documento_id, "obra_codigo": obra_codigo},
+        )
+    elif isinstance(termo, str) and termo.strip():
+        cur.execute(
+            """
+            SELECT id, bucket, object_key, nome_arquivo, extensao,
+                   disciplina_original, categoria_documental
+            FROM documentos_minio_obra
+            WHERE obra_codigo = %(obra_codigo)s
+              AND (nome_arquivo ILIKE %(termo)s OR object_key ILIKE %(termo)s)
+            ORDER BY CASE WHEN LOWER(COALESCE(extensao, '')) = 'pdf' THEN 0 ELSE 1 END,
+                     atualizado_em DESC NULLS LAST, criado_em DESC NULLS LAST, id DESC
+            LIMIT 1;
+            """,
+            {"obra_codigo": obra_codigo, "termo": f"%{termo.strip()}%"},
+        )
+    else:
+        raise ValueError("Informe documento_id ou termo para a análise documental.")
+
+    row = cur.fetchone()
+    if row is None:
+        return None
+    return {
+        "id": row[0],
+        "bucket": row[1],
+        "object_key": row[2],
+        "nome_arquivo": row[3],
+        "extensao": (row[4] or Path(row[3] or row[2]).suffix.lstrip(".")).lower(),
+        "disciplina_original": row[5],
+        "categoria_documental": row[6],
+    }
+
+
+def _baixar_objeto_minio_temporariamente(documento: dict[str, Any]) -> Path:
+    PASTA_TEMPORARIA_ANALISE.mkdir(parents=True, exist_ok=True)
+    sufixo = Path(documento["nome_arquivo"] or documento["object_key"]).suffix
+    destino = PASTA_TEMPORARIA_ANALISE / f"{uuid.uuid4().hex}{sufixo}"
+    try:
+        get_minio_client().fget_object(
+            documento["bucket"], documento["object_key"], str(destino)
+        )
+    except Exception:
+        destino.unlink(missing_ok=True)
+        raise
+    return destino
+
+
+def _resumir_texto_pdf(caminho: Path) -> tuple[str, list[str], dict[str, Any]]:
+    try:
+        from pypdf import PdfReader
+    except ImportError:
+        return (
+            "PDF identificado; extração textual indisponível no ambiente.",
+            ["Instale pypdf para habilitar a extração básica de texto."],
+            {"extracao_texto": False},
+        )
+
+    leitor = PdfReader(str(caminho))
+    partes: list[str] = []
+    paginas_lidas = 0
+    for pagina in leitor.pages[:LIMITE_PDF_PAGINAS]:
+        partes.append(pagina.extract_text() or "")
+        paginas_lidas += 1
+        if sum(len(parte) for parte in partes) >= LIMITE_PDF_CARACTERES:
+            break
+    texto = re.sub(r"\s+", " ", " ".join(partes)).strip()[:LIMITE_PDF_CARACTERES]
+    resumo = texto[:1_500] if texto else "PDF sem texto extraível nas páginas analisadas."
+    observacoes = []
+    if len(leitor.pages) > paginas_lidas:
+        observacoes.append(f"Análise limitada às primeiras {paginas_lidas} páginas.")
+    return resumo, observacoes, {
+        "extracao_texto": bool(texto),
+        "paginas_total": len(leitor.pages),
+        "paginas_analisadas": paginas_lidas,
+        "caracteres_extraidos": len(texto),
+    }
+
+
+def _resumir_planilha(caminho: Path) -> tuple[str, list[str], dict[str, Any]]:
+    try:
+        from openpyxl import load_workbook
+    except ImportError:
+        return (
+            "Planilha XLSX identificada; inspeção interna indisponível no ambiente.",
+            ["Instale openpyxl para extrair abas e dimensões básicas."],
+            {"extracao_planilha": False},
+        )
+
+    workbook = load_workbook(caminho, read_only=True, data_only=True)
+    try:
+        abas = [
+            {"nome": aba.title, "linhas": aba.max_row, "colunas": aba.max_column}
+            for aba in workbook.worksheets
+        ]
+    finally:
+        workbook.close()
+    descricao = "; ".join(
+        f"{aba['nome']} ({aba['linhas']}x{aba['colunas']})" for aba in abas
+    )
+    return f"Planilha com {len(abas)} aba(s): {descricao}."[:1_500], [], {
+        "extracao_planilha": True,
+        "abas": abas,
+    }
+
+
+def _analisar_documento_minio(documento: dict[str, Any]) -> dict[str, Any]:
+    cliente = get_minio_client()
+    stat = cliente.stat_object(documento["bucket"], documento["object_key"])
+    extensao = documento["extensao"]
+    metadados = {
+        "tamanho_bytes": stat.size,
+        "content_type": stat.content_type,
+        "ultima_modificacao": (
+            stat.last_modified.isoformat() if stat.last_modified else None
+        ),
+        "disciplina_original": documento["disciplina_original"],
+        "categoria_documental": documento["categoria_documental"],
+    }
+    observacoes: list[str] = []
+    caminho: Optional[Path] = None
+
+    if stat.size > LIMITE_DOWNLOAD_ANALISE_BYTES:
+        resumo = "Arquivo grande; análise preliminar restrita aos metadados."
+        observacoes.append(
+            f"Download não realizado: tamanho superior a {LIMITE_DOWNLOAD_ANALISE_BYTES} bytes."
+        )
+    elif extensao == "dwg":
+        resumo = "Arquivo DWG identificado; análise preliminar restrita aos metadados."
+        observacoes.append(
+            "Conteúdo técnico DWG requer ferramenta especializada; não foi interpretado."
+        )
+    elif extensao in {"png", "jpg", "jpeg", "gif", "bmp", "tif", "tiff", "webp"}:
+        resumo = "Imagem identificada; análise preliminar restrita aos metadados."
+        observacoes.append("OCR não foi aplicado.")
+    elif extensao not in {"pdf", "xlsx"}:
+        resumo = f"Arquivo {extensao.upper() or 'sem extensão'}; análise restrita aos metadados."
+    else:
+        caminho = _baixar_objeto_minio_temporariamente(documento)
+        try:
+            if extensao == "pdf":
+                resumo, observacoes_formato, metadados_formato = _resumir_texto_pdf(caminho)
+            else:
+                resumo, observacoes_formato, metadados_formato = _resumir_planilha(caminho)
+            observacoes.extend(observacoes_formato)
+            metadados.update(metadados_formato)
+        finally:
+            caminho.unlink(missing_ok=True)
+
+    resposta = (
+        f"Análise preliminar do documento {documento['id']} — {documento['nome_arquivo']}\n"
+        f"{resumo}\n"
+        + ("Observações: " + " ".join(observacoes) if observacoes else "")
+    ).strip()[:LIMITE_RESPOSTA_TELEGRAM]
+    return {
+        "resumo": resumo,
+        "observacoes": observacoes,
+        "metadados_extraidos": metadados,
+        "resposta_telegram": resposta,
+    }
+
+
+def _resultado_analise_documental(
+    cur: Any, obra_codigo: str, payload_comando: Any
+) -> dict[str, Any]:
+    documento = _buscar_documento_para_analise(cur, obra_codigo, payload_comando)
+    if documento is None:
+        return {
+            "tipo_resultado": "DOCUMENTO_NAO_ENCONTRADO",
+            "documento_id": None,
+            "nome_arquivo": None,
+            "bucket": None,
+            "object_key": None,
+            "minio_uri": None,
+            "extensao": None,
+            "resumo": "Documento não encontrado para a obra e o filtro informados.",
+            "observacoes": [],
+            "metadados_extraidos": {},
+            "resposta_telegram": "Não encontrei o documento solicitado nesta obra.",
+            **AGENTE_008_SEGURANCA_CONSULTA,
+        }
+
+    analise = _analisar_documento_minio(documento)
+    cur.execute(
+        """
+        INSERT INTO analises_documentais_obra (
+            documento_id, obra_codigo, resumo, observacoes,
+            metadados_extraidos, resposta_telegram
+        ) VALUES (
+            %(documento_id)s, %(obra_codigo)s, %(resumo)s, %(observacoes)s,
+            %(metadados_extraidos)s, %(resposta_telegram)s
+        );
+        """,
+        {
+            "documento_id": documento["id"],
+            "obra_codigo": obra_codigo,
+            "resumo": analise["resumo"],
+            "observacoes": Json(analise["observacoes"]),
+            "metadados_extraidos": Json(analise["metadados_extraidos"]),
+            "resposta_telegram": analise["resposta_telegram"],
+        },
+    )
+    return {
+        "tipo_resultado": "ANALISE_DOCUMENTAL_PRELIMINAR",
+        "documento_id": documento["id"],
+        "nome_arquivo": documento["nome_arquivo"],
+        "bucket": documento["bucket"],
+        "object_key": documento["object_key"],
+        "minio_uri": f"s3://{documento['bucket']}/{documento['object_key']}",
+        "extensao": documento["extensao"],
+        **analise,
+        **AGENTE_008_SEGURANCA_CONSULTA,
+    }
+
+
 @app.post("/agentes/gestao-operacional/processar-comando")
 def processar_comando_agente_gestao_operacional(
     payload: Optional[ProcessarComandoGestaoOperacionalRequest] = None,
@@ -2598,7 +2865,8 @@ def processar_comando_agente_gestao_operacional(
                     WHERE ce.agente_destino = 'AGENTE_008_GESTAO_OPERACIONAL_OBRA'
                       AND ce.tipo_comando IN (
                           'CONSULTAR_DOCUMENTOS_OBRA_RESUMO',
-                          'CONSULTAR_DOCUMENTOS_OBRA_INDEXADOS'
+                          'CONSULTAR_DOCUMENTOS_OBRA_INDEXADOS',
+                          'ANALISAR_DOCUMENTO_OBRA'
                       )
                       AND ce.status = 'PENDENTE'
                       AND (%(id_comando)s::uuid IS NULL OR ce.id_comando = %(id_comando)s::uuid)
@@ -2614,7 +2882,7 @@ def processar_comando_agente_gestao_operacional(
                     return {
                         "ok": True,
                         "agente": "AGENTE_008_GESTAO_OPERACIONAL_OBRA",
-                        "mvp": "0.6F",
+                        "mvp": "0.6H",
                         "status": "SEM_COMANDO_PENDENTE",
                         "message": (
                             "Nenhum comando PENDENTE para "
@@ -2632,8 +2900,12 @@ def processar_comando_agente_gestao_operacional(
                 }
                 if comando["tipo_comando"] == "CONSULTAR_DOCUMENTOS_OBRA_RESUMO":
                     resultado = _resultado_resumo_documental(cur, comando["obra_codigo"])
-                else:
+                elif comando["tipo_comando"] == "CONSULTAR_DOCUMENTOS_OBRA_INDEXADOS":
                     resultado = _resultado_documentos_indexados(
+                        cur, comando["obra_codigo"], comando["payload_comando"]
+                    )
+                else:
+                    resultado = _resultado_analise_documental(
                         cur, comando["obra_codigo"], comando["payload_comando"]
                     )
 
@@ -2683,7 +2955,7 @@ def processar_comando_agente_gestao_operacional(
     return {
         "ok": True,
         "agente": "AGENTE_008_GESTAO_OPERACIONAL_OBRA",
-        "mvp": "0.6F",
+        "mvp": "0.6H",
         "status_comando": "CONCLUIDO",
         "id_comando": str(comando["id_comando"]),
         "tipo_comando": comando["tipo_comando"],
@@ -2883,8 +3155,9 @@ async def receber_entrada_telegram(
     intencao_documental = classificacao["intencao"] in {
         "CONSULTAR_DOCUMENTOS_OBRA_RESUMO",
         "CONSULTAR_DOCUMENTOS_OBRA_INDEXADOS",
+        "ANALISAR_DOCUMENTO_OBRA",
     }
-    obra_codigo = payload.obra_codigo or ("OBRA-001" if intencao_documental else "OBRA-CAIO")
+    obra_codigo = payload.obra_codigo or "OBRA-CAIO"
     normalized = {
         "tenant_id": payload.tenant_id or "construtora-piloto",
         "obra_codigo": obra_codigo,
@@ -3357,6 +3630,10 @@ async def receber_entrada_telegram(
                             extrair_filtros_documentos_telegram(normalized["conteudo"])
                         )
                         payload_comando["limite"] = 10
+                    elif classificacao["tipo_comando"] == "ANALISAR_DOCUMENTO_OBRA":
+                        payload_comando.update(
+                            extrair_alvo_analise_documental(normalized["conteudo"])
+                        )
 
                 cur.execute(
                     insert_comando_sql,
@@ -4076,8 +4353,8 @@ def resumo_dia(obra_codigo: str):
 # -----------------------------------------------------------------------------
 
 MINIO_ENDPOINT = os.getenv("MINIO_ENDPOINT", "http://minio:9000")
-MINIO_ACCESS_KEY = os.getenv("MINIO_ACCESS_KEY")
-MINIO_SECRET_KEY = os.getenv("MINIO_SECRET_KEY")
+MINIO_ACCESS_KEY = os.getenv("MINIO_ACCESS_KEY") or os.getenv("MINIO_ROOT_USER")
+MINIO_SECRET_KEY = os.getenv("MINIO_SECRET_KEY") or os.getenv("MINIO_ROOT_PASSWORD")
 MINIO_DEFAULT_BUCKET = os.getenv("MINIO_DEFAULT_BUCKET", "obra-caio")
 
 
