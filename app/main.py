@@ -235,6 +235,21 @@ class GestaoOperacionalRiscosDocumentaisRequest(BaseModel):
     limite_amostras: int = Field(default=10, ge=1, le=50)
 
 
+class GestaoOperacionalPlanoSaneamentoDocumentalRequest(BaseModel):
+    obra_codigo: str
+    area: str | None = None
+    disciplina: str | None = None
+    limite_acoes: int = Field(default=10, ge=1, le=50)
+
+
+class GestaoOperacionalCriarPendenciaDocumentalRequest(BaseModel):
+    obra_codigo: str
+    area: str | None = None
+    disciplina: str | None = None
+    motivo: str
+    descricao: str | None = None
+
+
 class GestaoOperacionalUltimaRevisaoDocumentalRequest(BaseModel):
     obra_codigo: str
     disciplina: str | None = None
@@ -412,6 +427,35 @@ def classificar_intencao_executiva(conteudo: Optional[str]) -> dict[str, Any]:
     ]
     texto_comando = re.sub(r"\s+", " ", texto.strip().rstrip("?.!"))
     texto_comando_normalizado = normalizar_texto_comparacao(texto_comando)
+    comandos_plano_saneamento = {
+        "gerar plano de saneamento documental",
+        "plano de saneamento documental",
+        "plano para corrigir documentos obsoletos",
+        "listar acoes recomendadas para documentacao",
+        "acoes recomendadas documentacao",
+        "como corrigir riscos documentais",
+    }
+    if texto_comando_normalizado in comandos_plano_saneamento:
+        return {
+            "intencao": "GERAR_PLANO_SANEAMENTO_DOCUMENTAL",
+            "agente_destino": "AGENTE_008_GESTAO_OPERACIONAL_OBRA",
+            "tipo_comando": "GERAR_PLANO_SANEAMENTO_DOCUMENTAL",
+            "requer_aprovacao": False,
+            "confianca": 0.98,
+            "justificativa": "Plano consultivo de saneamento documental, sem abertura automática de pendências.",
+        }
+    if re.fullmatch(
+        r"(?:abrir|criar|registrar) pendencia (?:documental|de documento obsoleto|para revisar)(?: .+)?",
+        texto_comando_normalizado,
+    ):
+        return {
+            "intencao": "CRIAR_PENDENCIA_DOCUMENTAL",
+            "agente_destino": "AGENTE_008_GESTAO_OPERACIONAL_OBRA",
+            "tipo_comando": "CRIAR_PENDENCIA_DOCUMENTAL",
+            "requer_aprovacao": False,
+            "confianca": 0.98,
+            "justificativa": "Pedido explícito para registro de pendência interna de gestão documental.",
+        }
     comandos_riscos_documentais = {
         "verificar riscos documentais da obra", "riscos documentais da obra",
         "documentos criticos para campo", "tem conflito documental no refeitorio",
@@ -817,6 +861,11 @@ AGENTE_008_SEGURANCA_CONSULTA = {
     "envia_terceiros": False,
 }
 
+AGENTE_008_SEGURANCA_REGISTRO_INTERNO = {
+    **AGENTE_008_SEGURANCA_CONSULTA,
+    "modo": "REGISTRO_INTERNO",
+}
+
 
 def extrair_alvo_analise_documental(conteudo: Optional[str]) -> dict[str, Any]:
     texto = re.sub(r"\s+", " ", (conteudo or "").strip().rstrip("?.!"))
@@ -911,6 +960,24 @@ def extrair_riscos_documentais_telegram(conteudo: Optional[str]) -> dict[str, An
             disciplina = valor
             break
     return {"area": area, "disciplina": disciplina, "limite_amostras": 10}
+
+
+def extrair_pendencia_documental_telegram(conteudo: Optional[str]) -> dict[str, Any]:
+    texto_original = re.sub(r"\s+", " ", (conteudo or "").strip())
+    texto = normalizar_texto_comparacao(texto_original)
+    filtros = extrair_riscos_documentais_telegram(conteudo)
+    if "obsoleto" in texto:
+        motivo = "DOCUMENTO_OBSOLETO"
+    elif "revis" in texto:
+        motivo = "REVISAO_NAO_IDENTIFICADA"
+    else:
+        motivo = "RISCO_DOCUMENTAL"
+    return {
+        "area": filtros["area"],
+        "disciplina": filtros["disciplina"],
+        "motivo": motivo,
+        "descricao": texto_original or None,
+    }
 
 
 def extrair_documento_id_telegram(conteudo: Optional[str]) -> dict[str, int]:
@@ -3233,6 +3300,194 @@ def _avaliar_riscos_documentais(
     }
 
 
+def _gerar_plano_saneamento_documental(
+    cur: Any, obra_codigo: str, area: str | None,
+    disciplina: str | None, limite_acoes: int,
+) -> dict[str, Any]:
+    riscos = _avaliar_riscos_documentais(
+        cur, obra_codigo, area, disciplina, min(limite_acoes, 50)
+    )
+    area_normalizada = riscos["area"]
+    disciplina_normalizada = riscos["disciplina"]
+    params = {
+        "obra_codigo": obra_codigo,
+        "area": area_normalizada,
+        "disciplina": disciplina_normalizada,
+        "limite": max(1, min(limite_acoes, 50)),
+    }
+    cur.execute(
+        """
+        SELECT d.id, d.nome_arquivo, c.area_detectada, c.disciplina_detectada,
+               c.status_revisao, c.data_revisao_detectada,
+               c.confianca_classificacao, c.eh_obsoleto,
+               (
+                   c.eh_obsoleto IS TRUE AND EXISTS (
+                       SELECT 1
+                       FROM classificacoes_documentais_obra AS conflito
+                       WHERE conflito.obra_codigo = c.obra_codigo
+                         AND conflito.area_detectada IS NOT DISTINCT FROM c.area_detectada
+                         AND conflito.disciplina_detectada IS NOT DISTINCT FROM c.disciplina_detectada
+                         AND conflito.status_revisao = 'ALTERACAO'
+                   )
+               ) AS conflito_obsoleto_alteracao,
+               CASE
+                   WHEN c.eh_obsoleto IS TRUE AND EXISTS (
+                       SELECT 1
+                       FROM classificacoes_documentais_obra AS conflito
+                       WHERE conflito.obra_codigo = c.obra_codigo
+                         AND conflito.area_detectada IS NOT DISTINCT FROM c.area_detectada
+                         AND conflito.disciplina_detectada IS NOT DISTINCT FROM c.disciplina_detectada
+                         AND conflito.status_revisao = 'ALTERACAO'
+                   ) THEN 1
+                   WHEN c.eh_obsoleto IS TRUE THEN 1
+                   WHEN c.confianca_classificacao < 0.50
+                        AND COALESCE(d.categoria_documental, '') ILIKE '%%projeto%%' THEN 1
+                   WHEN c.status_revisao = 'NAO_IDENTIFICADO' OR c.status_revisao IS NULL THEN 2
+                   WHEN c.data_revisao_detectada IS NULL THEN 2
+                   WHEN c.confianca_classificacao < 0.50 THEN 3
+               END AS ordem_prioridade
+        FROM classificacoes_documentais_obra AS c
+        JOIN documentos_minio_obra AS d ON d.id = c.documento_id
+        WHERE c.obra_codigo = %(obra_codigo)s
+          AND (%(area)s::text IS NULL OR c.area_detectada = %(area)s::text)
+          AND (%(disciplina)s::text IS NULL OR c.disciplina_detectada = %(disciplina)s::text)
+          AND (
+              c.eh_obsoleto IS TRUE
+              OR c.status_revisao = 'NAO_IDENTIFICADO'
+              OR c.status_revisao IS NULL
+              OR c.data_revisao_detectada IS NULL
+              OR c.confianca_classificacao < 0.50
+          )
+        ORDER BY ordem_prioridade, c.confianca_classificacao NULLS FIRST, d.id
+        LIMIT %(limite)s;
+        """,
+        params,
+    )
+    acoes = []
+    for row in cur.fetchall():
+        motivos = []
+        if row[8]:
+            motivos.append("CONFLITO_OBSOLETO_ALTERACAO")
+        elif row[7]:
+            motivos.append("DOCUMENTO_OBSOLETO")
+        if row[4] in (None, "NAO_IDENTIFICADO"):
+            motivos.append("REVISAO_NAO_IDENTIFICADA")
+        if row[5] is None:
+            motivos.append("DATA_REVISAO_NAO_IDENTIFICADA")
+        if serialize_numeric(row[6]) < 0.50:
+            motivos.append("BAIXA_CONFIANCA_CLASSIFICACAO")
+        acoes.append({
+            "prioridade": f"PRIORIDADE_{row[9]}",
+            "documento_id": row[0],
+            "nome_arquivo": row[1],
+            "area": row[2],
+            "disciplina": row[3],
+            "motivos": motivos,
+            "acao_recomendada": "Validar revisão, vigência e aplicabilidade com o responsável técnico antes do uso em campo.",
+        })
+    pendencias_sugeridas = [{
+        "motivo": item["motivos"][0],
+        "descricao": f"Revisar documento {item['documento_id']} — {item['nome_arquivo'] or 'sem nome'}.",
+        "requer_pedido_explicito": True,
+    } for item in acoes]
+    recomendacao = (
+        "Priorizar as ações listadas e abrir pendência interna somente mediante pedido explícito do usuário."
+        if acoes else "Nenhuma ação de saneamento foi identificada para o recorte informado."
+    )
+    linhas = [
+        f"🧭 Plano de saneamento documental — {obra_codigo}",
+        f"Documentos avaliados: {riscos['totais']['total_documentos']}",
+        f"Ações recomendadas: {len(acoes)}", "",
+    ]
+    for item in acoes:
+        linhas.append(
+            f"- {item['prioridade']} | ID {item['documento_id']} | "
+            f"{item['nome_arquivo'] or 'Sem nome'} | {', '.join(item['motivos'])}"
+        )
+    linhas.extend(["", recomendacao])
+    return {
+        "obra_codigo": obra_codigo,
+        "area": area_normalizada,
+        "disciplina": disciplina_normalizada,
+        "total_documentos_avaliados": riscos["totais"]["total_documentos"],
+        "acoes_recomendadas": acoes,
+        "pendencias_sugeridas": pendencias_sugeridas,
+        "recomendacao": recomendacao,
+        "resposta_telegram": "\n".join(linhas),
+        **AGENTE_008_SEGURANCA_CONSULTA,
+    }
+
+
+def _criar_pendencia_documental(
+    cur: Any, obra_codigo: str, area: str | None, disciplina: str | None,
+    motivo: str, descricao: str | None,
+) -> dict[str, Any]:
+    motivos_validos = {
+        "DOCUMENTO_OBSOLETO", "REVISAO_NAO_IDENTIFICADA", "RISCO_DOCUMENTAL"
+    }
+    motivo_normalizado = normalizar_texto_comparacao(motivo).upper().replace(" ", "_")
+    if motivo_normalizado not in motivos_validos:
+        return _erro_pendencia_documental(
+            obra_codigo, "Motivo documental inválido; a pendência não foi criada."
+        )
+    cur.execute("SELECT to_regclass('public.pendencias_obra');")
+    if cur.fetchone()[0] is None:
+        return _erro_pendencia_documental(
+            obra_codigo, "A tabela public.pendencias_obra não existe; a pendência não foi criada."
+        )
+    cur.execute(
+        """
+        SELECT column_name
+        FROM information_schema.columns
+        WHERE table_schema = 'public' AND table_name = 'pendencias_obra';
+        """
+    )
+    colunas = {row[0] for row in cur.fetchall()}
+    obrigatorias = {"obra_codigo", "descricao", "categoria", "prioridade", "status_pendencia"}
+    origem_coluna = next(
+        (nome for nome in ("agente_origem", "origem", "criado_por") if nome in colunas), None
+    )
+    ausentes = sorted(obrigatorias - colunas)
+    if ausentes or origem_coluna is None:
+        detalhe = ", ".join(ausentes + (["agente_origem/origem/criado_por"] if origem_coluna is None else []))
+        return _erro_pendencia_documental(
+            obra_codigo, f"Schema de public.pendencias_obra incompatível ({detalhe}); a pendência não foi criada."
+        )
+    area_normalizada = normalizar_texto_comparacao(area).replace(" ", "_") if area else None
+    disciplina_normalizada = normalizar_texto_comparacao(disciplina).replace(" ", "_") if disciplina else None
+    descricao_final = descricao or f"Saneamento documental: {motivo_normalizado}."
+    if area_normalizada:
+        descricao_final += f" Área: {area_normalizada}."
+    if disciplina_normalizada:
+        descricao_final += f" Disciplina: {disciplina_normalizada}."
+    colunas_insert = ["obra_codigo", "descricao", "categoria", "prioridade", "status_pendencia", origem_coluna]
+    valores = [obra_codigo, descricao_final, "GESTAO_DOCUMENTAL", "ALTA", "ABERTA", "AGENTE_008_GESTAO_OPERACIONAL_OBRA"]
+    placeholders = ", ".join(["%s"] * len(valores))
+    cur.execute(
+        f"INSERT INTO public.pendencias_obra ({', '.join(colunas_insert)}) VALUES ({placeholders}) RETURNING id;",
+        valores,
+    )
+    pendencia_id = cur.fetchone()[0]
+    resposta = f"Pendência documental {pendencia_id} criada internamente para {obra_codigo}."
+    return {
+        "ok": True, "pendencia_criada": True, "pendencia_id": pendencia_id,
+        "obra_codigo": obra_codigo, "area": area_normalizada,
+        "disciplina": disciplina_normalizada, "motivo": motivo_normalizado,
+        "descricao": descricao_final, "categoria": "GESTAO_DOCUMENTAL",
+        "origem": "AGENTE_008_GESTAO_OPERACIONAL_OBRA",
+        "resposta_telegram": resposta,
+        **AGENTE_008_SEGURANCA_REGISTRO_INTERNO,
+    }
+
+
+def _erro_pendencia_documental(obra_codigo: str, mensagem: str) -> dict[str, Any]:
+    return {
+        "ok": False, "pendencia_criada": False, "obra_codigo": obra_codigo,
+        "erro_controlado": mensagem, "resposta_telegram": mensagem,
+        **AGENTE_008_SEGURANCA_REGISTRO_INTERNO,
+    }
+
+
 @app.post("/agentes/gestao-operacional/relatorio-documental")
 def relatorio_documental_gestao_operacional(
     payload: GestaoOperacionalRelatorioDocumentalRequest,
@@ -3270,6 +3525,45 @@ def riscos_documentais_gestao_operacional(
             "message": "Erro ao avaliar riscos documentais da obra.", "error": str(exc),
         })
     return {"ok": True, "agente": "AGENTE_008_GESTAO_OPERACIONAL_OBRA", "mvp": "0.6L", **resultado}
+
+
+@app.post("/agentes/gestao-operacional/plano-saneamento-documental")
+def plano_saneamento_documental_gestao_operacional(
+    payload: GestaoOperacionalPlanoSaneamentoDocumentalRequest,
+):
+    try:
+        with get_db_connection() as conn:
+            with conn.cursor() as cur:
+                resultado = _gerar_plano_saneamento_documental(
+                    cur, payload.obra_codigo, payload.area,
+                    payload.disciplina, payload.limite_acoes,
+                )
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail={
+            "message": "Erro ao gerar plano de saneamento documental.", "error": str(exc),
+        })
+    return {"ok": True, "agente": "AGENTE_008_GESTAO_OPERACIONAL_OBRA", "mvp": "0.6M", **resultado}
+
+
+@app.post("/agentes/gestao-operacional/criar-pendencia-documental")
+def criar_pendencia_documental_gestao_operacional(
+    payload: GestaoOperacionalCriarPendenciaDocumentalRequest,
+):
+    try:
+        with get_db_connection() as conn:
+            with conn.cursor() as cur:
+                resultado = _criar_pendencia_documental(
+                    cur, payload.obra_codigo, payload.area, payload.disciplina,
+                    payload.motivo, payload.descricao,
+                )
+                if not resultado["pendencia_criada"]:
+                    conn.rollback()
+    except Exception as exc:
+        resultado = _erro_pendencia_documental(
+            payload.obra_codigo,
+            f"Erro controlado ao criar pendência documental; a pendência não foi criada: {exc}",
+        )
+    return {"agente": "AGENTE_008_GESTAO_OPERACIONAL_OBRA", "mvp": "0.6M", **resultado}
 
 
 @app.post("/agentes/gestao-operacional/ultima-revisao-documental")
@@ -4005,7 +4299,9 @@ def processar_comando_agente_gestao_operacional(
                           'GERAR_RELATORIO_DOCUMENTAL_OBRA',
                           'AVALIAR_RISCOS_DOCUMENTAIS_OBRA',
                           'CONSULTAR_ULTIMA_REVISAO_DOCUMENTAL',
-                          'VALIDAR_DOCUMENTO_CAMPO'
+                          'VALIDAR_DOCUMENTO_CAMPO',
+                          'GERAR_PLANO_SANEAMENTO_DOCUMENTAL',
+                          'CRIAR_PENDENCIA_DOCUMENTAL'
                       )
                       AND ce.status = 'PENDENTE'
                       AND (%(id_comando)s::uuid IS NULL OR ce.id_comando = %(id_comando)s::uuid)
@@ -4078,28 +4374,72 @@ def processar_comando_agente_gestao_operacional(
                         cur, comando["obra_codigo"],
                         int((comando["payload_comando"] or {})["documento_id"]),
                     )
+                elif comando["tipo_comando"] == "GERAR_PLANO_SANEAMENTO_DOCUMENTAL":
+                    payload_plano = comando["payload_comando"] or {}
+                    try:
+                        with conn.transaction():
+                            resultado = _gerar_plano_saneamento_documental(
+                                cur, comando["obra_codigo"], payload_plano.get("area"),
+                                payload_plano.get("disciplina"),
+                                int(payload_plano.get("limite_acoes", 10)),
+                            )
+                    except Exception as exc:
+                        resultado = {
+                            "ok": False,
+                            "erro_controlado": f"Plano de saneamento não gerado: {exc}",
+                            "resposta_telegram": "Não foi possível gerar o plano de saneamento documental.",
+                            **AGENTE_008_SEGURANCA_CONSULTA,
+                        }
+                elif comando["tipo_comando"] == "CRIAR_PENDENCIA_DOCUMENTAL":
+                    payload_pendencia = comando["payload_comando"] or {}
+                    try:
+                        with conn.transaction():
+                            resultado = _criar_pendencia_documental(
+                                cur, comando["obra_codigo"], payload_pendencia.get("area"),
+                                payload_pendencia.get("disciplina"),
+                                str(payload_pendencia.get("motivo", "RISCO_DOCUMENTAL")),
+                                payload_pendencia.get("descricao"),
+                            )
+                    except Exception as exc:
+                        resultado = _erro_pendencia_documental(
+                            comando["obra_codigo"],
+                            f"Erro controlado ao criar pendência; a pendência não foi criada: {exc}",
+                        )
                 else:
                     resultado = _resultado_consulta_documentos_classificados(
                         cur, comando["obra_codigo"], comando["payload_comando"]
                     )
 
+                status_resultado = (
+                    "ERRO"
+                    if comando["tipo_comando"] in {
+                        "CRIAR_PENDENCIA_DOCUMENTAL",
+                        "GERAR_PLANO_SANEAMENTO_DOCUMENTAL",
+                    }
+                    and resultado.get("ok") is False
+                    else "CONCLUIDO"
+                )
                 cur.execute(
                     """
                     UPDATE comandos_executivos
-                    SET status = 'CONCLUIDO',
+                    SET status = %(status)s,
                         executado_por = 'AGENTE_008_GESTAO_OPERACIONAL_OBRA',
                         executado_em = NOW(),
                         resultado = %(resultado)s,
-                        mensagem_erro = NULL,
+                        mensagem_erro = %(mensagem_erro)s,
                         atualizado_em = NOW()
                     WHERE id = %(id)s AND status = 'PENDENTE'
                     RETURNING status;
                     """,
-                    {"id": comando["id"], "resultado": Json(resultado)},
+                    {
+                        "id": comando["id"], "resultado": Json(resultado),
+                        "status": status_resultado,
+                        "mensagem_erro": resultado.get("erro_controlado"),
+                    },
                 )
                 atualizado = cur.fetchone()
                 if atualizado is None:
-                    raise RuntimeError("Comando não pôde ser atualizado para CONCLUIDO.")
+                    raise RuntimeError("Comando não pôde ser atualizado para o status final.")
             conn.commit()
         except Exception:
             conn.rollback()
@@ -4130,7 +4470,7 @@ def processar_comando_agente_gestao_operacional(
         "ok": True,
         "agente": "AGENTE_008_GESTAO_OPERACIONAL_OBRA",
         "mvp": "0.6L",
-        "status_comando": "CONCLUIDO",
+        "status_comando": status_resultado,
         "id_comando": str(comando["id_comando"]),
         "tipo_comando": comando["tipo_comando"],
         "obra_codigo": comando["obra_codigo"],
@@ -4336,6 +4676,8 @@ async def receber_entrada_telegram(
         "AVALIAR_RISCOS_DOCUMENTAIS_OBRA",
         "CONSULTAR_ULTIMA_REVISAO_DOCUMENTAL",
         "VALIDAR_DOCUMENTO_CAMPO",
+        "GERAR_PLANO_SANEAMENTO_DOCUMENTAL",
+        "CRIAR_PENDENCIA_DOCUMENTAL",
     }
     obra_codigo = payload.obra_codigo or "OBRA-CAIO"
     normalized = {
@@ -4848,6 +5190,21 @@ async def receber_entrada_telegram(
                             "obra_codigo": obra_codigo,
                             **extrair_documento_id_telegram(normalized["conteudo"]),
                             **AGENTE_008_SEGURANCA_CONSULTA,
+                        }
+                    elif classificacao["tipo_comando"] == "GERAR_PLANO_SANEAMENTO_DOCUMENTAL":
+                        filtros = extrair_riscos_documentais_telegram(normalized["conteudo"])
+                        payload_comando = {
+                            "obra_codigo": obra_codigo,
+                            "area": filtros["area"],
+                            "disciplina": filtros["disciplina"],
+                            "limite_acoes": 10,
+                            **AGENTE_008_SEGURANCA_CONSULTA,
+                        }
+                    elif classificacao["tipo_comando"] == "CRIAR_PENDENCIA_DOCUMENTAL":
+                        payload_comando = {
+                            "obra_codigo": obra_codigo,
+                            **extrair_pendencia_documental_telegram(normalized["conteudo"]),
+                            **AGENTE_008_SEGURANCA_REGISTRO_INTERNO,
                         }
 
                 cur.execute(
