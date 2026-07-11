@@ -2604,6 +2604,29 @@ LIMITE_RESPOSTA_TELEGRAM = 3_000
 PASTA_TEMPORARIA_ANALISE = Path("/tmp/agente_008_documentos")
 
 
+def _avaliar_qualidade_texto(texto: str) -> dict[str, Any]:
+    total_caracteres = len(texto)
+    total_letras = sum(caractere.isalpha() for caractere in texto)
+    total_digitos = sum(caractere.isdigit() for caractere in texto)
+    total_palavras = len(re.findall(r"\b[^\W\d_]+\b", texto, flags=re.UNICODE))
+    alpha_ratio = total_letras / total_caracteres if total_caracteres else 0.0
+    digit_ratio = total_digitos / total_caracteres if total_caracteres else 0.0
+    texto_util = (
+        total_letras >= 80
+        and total_palavras >= 15
+        and alpha_ratio >= 0.25
+    )
+    return {
+        "total_caracteres": total_caracteres,
+        "total_letras": total_letras,
+        "total_digitos": total_digitos,
+        "total_palavras": total_palavras,
+        "alpha_ratio": alpha_ratio,
+        "digit_ratio": digit_ratio,
+        "texto_util": texto_util,
+    }
+
+
 def _buscar_documento_para_analise(
     cur: Any, obra_codigo: str, payload_comando: Any
 ) -> Optional[dict[str, Any]]:
@@ -2689,8 +2712,20 @@ def _resumir_texto_pdf(caminho: Path) -> tuple[str, list[str], dict[str, Any]]:
         if sum(len(parte) for parte in partes) >= LIMITE_PDF_CARACTERES:
             break
     texto = re.sub(r"\s+", " ", " ".join(partes)).strip()[:LIMITE_PDF_CARACTERES]
-    resumo = texto[:1_500] if texto else "PDF sem texto extraível nas páginas analisadas."
+    qualidade_texto = _avaliar_qualidade_texto(texto)
     observacoes = []
+    if qualidade_texto["texto_util"]:
+        resumo = texto[:1_500]
+    else:
+        resumo = (
+            "PDF analisado, mas sem texto técnico útil extraível nas páginas avaliadas."
+        )
+        observacoes.extend(
+            [
+                "O arquivo pode ser prancha técnica, desenho vetorial, digitalização ou exportação CAD.",
+                "A análise ficou limitada a metadados do documento.",
+            ]
+        )
     if len(leitor.pages) > paginas_lidas:
         observacoes.append(f"Análise limitada às primeiras {paginas_lidas} páginas.")
     return resumo, observacoes, {
@@ -2698,6 +2733,7 @@ def _resumir_texto_pdf(caminho: Path) -> tuple[str, list[str], dict[str, Any]]:
         "paginas_total": len(leitor.pages),
         "paginas_analisadas": paginas_lidas,
         "caracteres_extraidos": len(texto),
+        "qualidade_texto": qualidade_texto,
     }
 
 
