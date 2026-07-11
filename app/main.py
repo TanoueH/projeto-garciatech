@@ -222,6 +222,12 @@ class GestaoOperacionalDocumentosClassificadosRequest(BaseModel):
     limite: int = Field(default=50, ge=1, le=200)
 
 
+class GestaoOperacionalRelatorioDocumentalRequest(BaseModel):
+    obra_codigo: str
+    incluir_amostras: bool = True
+    limite_amostras: int = Field(default=5, ge=1, le=5)
+
+
 def get_db_connection():
     if not DATABASE_URL:
         raise RuntimeError("DATABASE_URL não definida.")
@@ -387,6 +393,22 @@ def classificar_intencao_executiva(conteudo: Optional[str]) -> dict[str, Any]:
     ]
     texto_comando = re.sub(r"\s+", " ", texto.strip().rstrip("?.!"))
     texto_comando_normalizado = normalizar_texto_comparacao(texto_comando)
+    comandos_relatorio_documental = {
+        "relatorio documental da obra",
+        "resumo documental da obra",
+        "situacao dos projetos",
+        "diagnostico documental",
+        "relatorio dos documentos",
+    }
+    if texto_comando_normalizado in comandos_relatorio_documental:
+        return {
+            "intencao": "GERAR_RELATORIO_DOCUMENTAL_OBRA",
+            "agente_destino": "AGENTE_008_GESTAO_OPERACIONAL_OBRA",
+            "tipo_comando": "GERAR_RELATORIO_DOCUMENTAL_OBRA",
+            "requer_aprovacao": False,
+            "confianca": 0.98,
+            "justificativa": "Relatório executivo somente leitura da classificação documental da obra.",
+        }
     if texto_comando_normalizado in {"classificar documentos", "reclassificar documentos"}:
         return {
             "intencao": "CLASSIFICAR_DOCUMENTOS_OBRA",
@@ -2638,6 +2660,148 @@ def _consultar_documentos_classificados(
     ]
 
 
+def _gerar_relatorio_documental(
+    cur: Any, obra_codigo: str, incluir_amostras: bool, limite_amostras: int
+) -> dict[str, Any]:
+    limite_amostras = max(1, min(limite_amostras, 5))
+    cur.execute(
+        """
+        SELECT
+            (SELECT COUNT(*) FROM documentos_minio_obra WHERE obra_codigo = %(obra_codigo)s),
+            COUNT(*),
+            COUNT(*) FILTER (WHERE eh_obsoleto IS TRUE),
+            COUNT(*) FILTER (WHERE eh_as_built IS TRUE),
+            COUNT(*) FILTER (WHERE status_revisao = 'ALTERACAO'),
+            COUNT(*) FILTER (WHERE status_revisao = 'NAO_IDENTIFICADO' OR status_revisao IS NULL),
+            COUNT(*) FILTER (WHERE confianca_classificacao < 0.50)
+        FROM classificacoes_documentais_obra
+        WHERE obra_codigo = %(obra_codigo)s;
+        """,
+        {"obra_codigo": obra_codigo},
+    )
+    totais = cur.fetchone()
+    total_indexado, total_classificado = totais[0], totais[1]
+
+    def resumo(campo: str) -> dict[str, int]:
+        cur.execute(
+            f"""
+            SELECT COALESCE(NULLIF({campo}, ''), 'NAO_IDENTIFICADO'), COUNT(*)
+            FROM classificacoes_documentais_obra
+            WHERE obra_codigo = %(obra_codigo)s
+            GROUP BY {campo}
+            ORDER BY COUNT(*) DESC, COALESCE(NULLIF({campo}, ''), 'NAO_IDENTIFICADO');
+            """,
+            {"obra_codigo": obra_codigo},
+        )
+        return {row[0]: row[1] for row in cur.fetchall()}
+
+    resumo_disciplina = resumo("disciplina_detectada")
+    resumo_area = resumo("area_detectada")
+    resumo_status = resumo("status_revisao")
+
+    def amostra(condicao: str) -> list[dict[str, Any]]:
+        if not incluir_amostras:
+            return []
+        cur.execute(
+            f"""
+            SELECT d.id, d.nome_arquivo, c.area_detectada, c.disciplina_detectada,
+                   c.status_revisao, c.numero_revisao, c.confianca_classificacao
+            FROM classificacoes_documentais_obra AS c
+            JOIN documentos_minio_obra AS d ON d.id = c.documento_id
+            WHERE c.obra_codigo = %(obra_codigo)s AND ({condicao})
+            ORDER BY c.confianca_classificacao, d.id
+            LIMIT %(limite)s;
+            """,
+            {"obra_codigo": obra_codigo, "limite": limite_amostras},
+        )
+        return [
+            {
+                "documento_id": row[0],
+                "nome_arquivo": row[1],
+                "area": row[2],
+                "disciplina": row[3],
+                "status_revisao": row[4],
+                "numero_revisao": row[5],
+                "confianca_classificacao": serialize_numeric(row[6]),
+            }
+            for row in cur.fetchall()
+        ]
+
+    recomendacoes = ["Validar revisões antes de liberar uso em campo."]
+    if totais[2]:
+        recomendacoes.append("Segregar documentos obsoletos das referências vigentes.")
+    if totais[5] or totais[6]:
+        recomendacoes.append("Revisar documentos sem revisão identificada ou com baixa confiança.")
+
+    linhas = [
+        f"📁 Relatório documental — {obra_codigo}", "",
+        f"Total indexado: {total_indexado}",
+        f"Classificados: {total_classificado}",
+        f"Sem classificação: {max(total_indexado - total_classificado, 0)}",
+        "", "Por disciplina:",
+    ]
+    linhas.extend(
+        f"- {disciplina}: {total}"
+        for disciplina, total in list(resumo_disciplina.items())[:8]
+    )
+    if resumo_area:
+        linhas.extend(["", "Por área:"])
+        linhas.extend(
+            f"- {area}: {total}"
+            for area, total in list(resumo_area.items())[:5]
+        )
+    linhas.extend([
+        "", "Pontos de atenção:",
+        f"- {totais[2]} documentos obsoletos",
+        f"- {totais[3]} documentos As Built",
+        f"- {totais[4]} documentos com alteração",
+        f"- {totais[5]} sem revisão identificada",
+        f"- {totais[6]} com baixa confiança",
+        "", "Recomendação:", recomendacoes[0],
+    ])
+    return {
+        "obra_codigo": obra_codigo,
+        "total_indexado": total_indexado,
+        "total_classificado": total_classificado,
+        "total_sem_classificacao": max(total_indexado - total_classificado, 0),
+        "resumo_por_disciplina": resumo_disciplina,
+        "resumo_por_area": resumo_area,
+        "resumo_por_status_revisao": resumo_status,
+        "total_obsoletos": totais[2],
+        "total_as_built": totais[3],
+        "total_com_alteracao": totais[4],
+        "total_sem_revisao_identificada": totais[5],
+        "total_baixa_confianca": totais[6],
+        "documentos_obsoletos_amostra": amostra("c.eh_obsoleto IS TRUE"),
+        "documentos_baixa_confianca_amostra": amostra("c.confianca_classificacao < 0.50"),
+        "documentos_sem_revisao_amostra": amostra(
+            "c.status_revisao = 'NAO_IDENTIFICADO' OR c.status_revisao IS NULL"
+        ),
+        "recomendacoes": recomendacoes,
+        "resposta_telegram": "\n".join(linhas),
+        **AGENTE_008_SEGURANCA_CONSULTA,
+    }
+
+
+@app.post("/agentes/gestao-operacional/relatorio-documental")
+def relatorio_documental_gestao_operacional(
+    payload: GestaoOperacionalRelatorioDocumentalRequest,
+):
+    try:
+        with get_db_connection() as conn:
+            with conn.cursor() as cur:
+                resultado = _gerar_relatorio_documental(
+                    cur, payload.obra_codigo, payload.incluir_amostras,
+                    payload.limite_amostras,
+                )
+    except Exception as exc:
+        raise HTTPException(
+            status_code=500,
+            detail={"message": "Erro ao gerar relatório documental da obra.", "error": str(exc)},
+        )
+    return {"ok": True, "agente": "AGENTE_008_GESTAO_OPERACIONAL_OBRA", "mvp": "0.6J", **resultado}
+
+
 @app.post("/agentes/gestao-operacional/classificar-documentos")
 def classificar_documentos_gestao_operacional(payload: GestaoOperacionalClassificarDocumentosRequest):
     try:
@@ -3326,7 +3490,8 @@ def processar_comando_agente_gestao_operacional(
                           'CONSULTAR_DOCUMENTOS_OBRA_INDEXADOS',
                           'ANALISAR_DOCUMENTO_OBRA',
                           'CLASSIFICAR_DOCUMENTOS_OBRA',
-                          'CONSULTAR_DOCUMENTOS_CLASSIFICADOS'
+                          'CONSULTAR_DOCUMENTOS_CLASSIFICADOS',
+                          'GERAR_RELATORIO_DOCUMENTAL_OBRA'
                       )
                       AND ce.status = 'PENDENTE'
                       AND (%(id_comando)s::uuid IS NULL OR ce.id_comando = %(id_comando)s::uuid)
@@ -3371,6 +3536,14 @@ def processar_comando_agente_gestao_operacional(
                 elif comando["tipo_comando"] == "CLASSIFICAR_DOCUMENTOS_OBRA":
                     resultado = _resultado_classificacao_documental(
                         cur, comando["obra_codigo"], comando["payload_comando"]
+                    )
+                elif comando["tipo_comando"] == "GERAR_RELATORIO_DOCUMENTAL_OBRA":
+                    payload_relatorio = comando["payload_comando"] or {}
+                    resultado = _gerar_relatorio_documental(
+                        cur,
+                        comando["obra_codigo"],
+                        bool(payload_relatorio.get("incluir_amostras", True)),
+                        int(payload_relatorio.get("limite_amostras", 5)),
                     )
                 else:
                     resultado = _resultado_consulta_documentos_classificados(
@@ -3423,7 +3596,7 @@ def processar_comando_agente_gestao_operacional(
     return {
         "ok": True,
         "agente": "AGENTE_008_GESTAO_OPERACIONAL_OBRA",
-        "mvp": "0.6I",
+        "mvp": "0.6J",
         "status_comando": "CONCLUIDO",
         "id_comando": str(comando["id_comando"]),
         "tipo_comando": comando["tipo_comando"],
@@ -3626,6 +3799,7 @@ async def receber_entrada_telegram(
         "ANALISAR_DOCUMENTO_OBRA",
         "CLASSIFICAR_DOCUMENTOS_OBRA",
         "CONSULTAR_DOCUMENTOS_CLASSIFICADOS",
+        "GERAR_RELATORIO_DOCUMENTAL_OBRA",
     }
     obra_codigo = payload.obra_codigo or "OBRA-CAIO"
     normalized = {
@@ -4115,6 +4289,12 @@ async def receber_entrada_telegram(
                         payload_comando.update(
                             extrair_filtros_classificacao_telegram(normalized["conteudo"])
                         )
+                    elif classificacao["tipo_comando"] == "GERAR_RELATORIO_DOCUMENTAL_OBRA":
+                        payload_comando = {
+                            "obra_codigo": obra_codigo,
+                            "incluir_amostras": True,
+                            "limite_amostras": 5,
+                        }
 
                 cur.execute(
                     insert_comando_sql,
