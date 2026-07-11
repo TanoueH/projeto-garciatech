@@ -228,6 +228,18 @@ class GestaoOperacionalRelatorioDocumentalRequest(BaseModel):
     limite_amostras: int = Field(default=5, ge=1, le=5)
 
 
+class GestaoOperacionalUltimaRevisaoDocumentalRequest(BaseModel):
+    obra_codigo: str
+    disciplina: str | None = None
+    area: str | None = None
+    limite_candidatos: int = Field(default=10, ge=1, le=100)
+
+
+class GestaoOperacionalValidarDocumentoCampoRequest(BaseModel):
+    obra_codigo: str
+    documento_id: int = Field(gt=0)
+
+
 def get_db_connection():
     if not DATABASE_URL:
         raise RuntimeError("DATABASE_URL não definida.")
@@ -393,6 +405,31 @@ def classificar_intencao_executiva(conteudo: Optional[str]) -> dict[str, Any]:
     ]
     texto_comando = re.sub(r"\s+", " ", texto.strip().rstrip("?.!"))
     texto_comando_normalizado = normalizar_texto_comparacao(texto_comando)
+    if re.fullmatch(
+        r"(?:posso usar o |validar |verificar uso |esse )?documento\s+\d+(?:\s+(?:em campo|esta obsoleto|pode ir para campo))?",
+        texto_comando_normalizado,
+    ) or re.fullmatch(r"esse documento\s+\d+\s+pode ir para campo", texto_comando_normalizado):
+        return {
+            "intencao": "VALIDAR_DOCUMENTO_CAMPO",
+            "agente_destino": "AGENTE_008_GESTAO_OPERACIONAL_OBRA",
+            "tipo_comando": "VALIDAR_DOCUMENTO_CAMPO",
+            "requer_aprovacao": False,
+            "confianca": 0.98,
+            "justificativa": "Validação consultiva de documento para uso em campo, sem liberação definitiva.",
+        }
+    if (
+        texto_comando_normalizado.startswith("ultima revisao ")
+        or re.fullmatch(r"qual a ultima revisao do .+", texto_comando_normalizado)
+        or re.fullmatch(r"qual projeto .+ mais recente", texto_comando_normalizado)
+    ):
+        return {
+            "intencao": "CONSULTAR_ULTIMA_REVISAO_DOCUMENTAL",
+            "agente_destino": "AGENTE_008_GESTAO_OPERACIONAL_OBRA",
+            "tipo_comando": "CONSULTAR_ULTIMA_REVISAO_DOCUMENTAL",
+            "requer_aprovacao": False,
+            "confianca": 0.98,
+            "justificativa": "Consulta somente leitura da revisão documental mais recente não obsoleta.",
+        }
     comandos_relatorio_documental = {
         "relatorio documental da obra",
         "resumo documental da obra",
@@ -816,6 +853,20 @@ def extrair_filtros_classificacao_telegram(conteudo: Optional[str]) -> dict[str,
     if texto.startswith("ultima revisao"):
         filtros["modo"] = "ULTIMA_REVISAO"
     return filtros
+
+
+def extrair_ultima_revisao_telegram(conteudo: Optional[str]) -> dict[str, Any]:
+    filtros = extrair_filtros_documentos_telegram(conteudo)
+    return {
+        "disciplina": filtros["disciplina"],
+        "area": None,
+        "limite_candidatos": 10,
+    }
+
+
+def extrair_documento_id_telegram(conteudo: Optional[str]) -> dict[str, int]:
+    correspondencia = re.search(r"\bdocumento\s+(\d+)\b", conteudo or "", re.IGNORECASE)
+    return {"documento_id": int(correspondencia.group(1))} if correspondencia else {}
 
 
 def montar_resposta_documentos_resumo_telegram(obra_codigo: str) -> str:
@@ -2660,6 +2711,193 @@ def _consultar_documentos_classificados(
     ]
 
 
+def _formatar_documento_revisao(row: tuple[Any, ...]) -> dict[str, Any]:
+    return {
+        "documento_id": row[0],
+        "nome_arquivo": row[1],
+        "disciplina_detectada": row[2],
+        "area_detectada": row[3],
+        "status_revisao": row[4],
+        "data_revisao_detectada": serialize_date(row[5]),
+        "numero_revisao": row[6],
+        "eh_obsoleto": row[7],
+        "eh_as_built": row[8],
+        "confianca_classificacao": serialize_numeric(row[9]),
+    }
+
+
+def _ultima_revisao_documental(
+    cur: Any, obra_codigo: str, disciplina: str | None,
+    area: str | None, limite_candidatos: int,
+) -> dict[str, Any]:
+    disciplina_normalizada = (
+        normalizar_texto_comparacao(disciplina).replace(" ", "_")
+        if disciplina else None
+    )
+    area_normalizada = (
+        normalizar_texto_comparacao(area).replace(" ", "_") if area else None
+    )
+    params = {
+        "obra_codigo": obra_codigo,
+        "disciplina": disciplina_normalizada,
+        "area": area_normalizada,
+        "limite": limite_candidatos,
+    }
+    filtros = """
+        c.obra_codigo = %(obra_codigo)s
+        AND (%(disciplina)s IS NULL OR c.disciplina_detectada = %(disciplina)s)
+        AND (%(area)s IS NULL OR c.area_detectada = %(area)s)
+    """
+    cur.execute(
+        f"""
+        SELECT COUNT(*) FILTER (WHERE c.eh_obsoleto IS TRUE),
+               COUNT(*) FILTER (WHERE c.eh_obsoleto IS NOT TRUE), COUNT(*)
+        FROM classificacoes_documentais_obra AS c
+        JOIN documentos_minio_obra AS d ON d.id = c.documento_id
+        WHERE {filtros};
+        """,
+        params,
+    )
+    total_obsoletos, total_candidatos, total_documentos = cur.fetchone()
+    cur.execute(
+        f"""
+        SELECT d.id, d.nome_arquivo, c.disciplina_detectada, c.area_detectada,
+               c.status_revisao, c.data_revisao_detectada, c.numero_revisao,
+               c.eh_obsoleto, c.eh_as_built, c.confianca_classificacao
+        FROM classificacoes_documentais_obra AS c
+        JOIN documentos_minio_obra AS d ON d.id = c.documento_id
+        WHERE {filtros} AND c.eh_obsoleto IS NOT TRUE
+        ORDER BY c.data_revisao_detectada DESC NULLS LAST,
+                 c.numero_revisao DESC NULLS LAST, c.documento_id DESC
+        LIMIT %(limite)s;
+        """,
+        params,
+    )
+    candidatos = [_formatar_documento_revisao(row) for row in cur.fetchall()]
+    recomendado = candidatos[0] if candidatos else None
+    alertas: list[str] = []
+    if total_obsoletos:
+        alertas.append(
+            f"Existem {total_obsoletos} documento(s) obsoleto(s) no recorte consultado."
+        )
+    if not recomendado:
+        alertas.append("Não há documento seguro recomendado para os filtros informados.")
+        if total_documentos and total_documentos == total_obsoletos:
+            alertas.append("Existem documentos, mas todos estão marcados como obsoletos.")
+    recomendacao = "Validar formalmente antes de liberar uso em campo."
+    titulo = disciplina_normalizada or "todas as disciplinas"
+    linhas = [f"📌 Última revisão — {titulo} / {obra_codigo}", ""]
+    if recomendado:
+        linhas.extend([
+            "Documento recomendado:",
+            f"ID {recomendado['documento_id']} — {recomendado['nome_arquivo']}", "",
+            "Status:", recomendado["status_revisao"] or "NAO_IDENTIFICADO", "",
+            "Data detectada:",
+            formatar_data_telegram(recomendado["data_revisao_detectada"]), "",
+        ])
+    else:
+        linhas.extend(["Documento recomendado:", "Nenhum documento seguro identificado.", ""])
+    linhas.append("Alertas:")
+    linhas.extend(f"- {alerta}" for alerta in (alertas or ["Nenhum alerta adicional."]))
+    linhas.extend(["", "Recomendação:", recomendacao])
+    return {
+        "obra_codigo": obra_codigo,
+        "disciplina": disciplina_normalizada,
+        "area": area_normalizada,
+        "documento_recomendado": recomendado,
+        "candidatos_considerados": candidatos,
+        "existem_obsoletos_na_disciplina": total_obsoletos > 0,
+        "total_obsoletos_na_disciplina": total_obsoletos,
+        "total_candidatos": total_candidatos,
+        "alertas": alertas,
+        "recomendacao": recomendacao,
+        "resposta_telegram": "\n".join(linhas),
+        **AGENTE_008_SEGURANCA_CONSULTA,
+    }
+
+
+def formatar_data_telegram(valor: str | None) -> str:
+    if not valor:
+        return "não identificada"
+    try:
+        return date.fromisoformat(valor).strftime("%d/%m/%Y")
+    except ValueError:
+        return valor
+
+
+def _validar_documento_campo(
+    cur: Any, obra_codigo: str, documento_id: int,
+) -> dict[str, Any]:
+    cur.execute(
+        """
+        SELECT d.id, d.nome_arquivo, c.disciplina_detectada, c.area_detectada,
+               c.status_revisao, c.data_revisao_detectada, c.numero_revisao,
+               c.eh_obsoleto, c.eh_as_built, c.confianca_classificacao
+        FROM documentos_minio_obra AS d
+        LEFT JOIN classificacoes_documentais_obra AS c ON c.documento_id = d.id
+        WHERE d.obra_codigo = %(obra_codigo)s AND d.id = %(documento_id)s
+        LIMIT 1;
+        """,
+        {"obra_codigo": obra_codigo, "documento_id": documento_id},
+    )
+    row = cur.fetchone()
+    if row is None:
+        raise HTTPException(status_code=404, detail={"message": "Documento não encontrado na obra."})
+    documento = _formatar_documento_revisao(row)
+    cur.execute(
+        """
+        SELECT d.id, d.nome_arquivo
+        FROM classificacoes_documentais_obra AS c
+        JOIN documentos_minio_obra AS d ON d.id = c.documento_id
+        WHERE c.obra_codigo = %(obra_codigo)s
+          AND c.disciplina_detectada IS NOT DISTINCT FROM %(disciplina)s
+          AND c.area_detectada IS NOT DISTINCT FROM %(area)s
+          AND c.eh_obsoleto IS NOT TRUE
+        ORDER BY c.data_revisao_detectada DESC NULLS LAST,
+                 c.numero_revisao DESC NULLS LAST, c.documento_id DESC
+        LIMIT 1;
+        """,
+        {"obra_codigo": obra_codigo, "disciplina": row[2], "area": row[3]},
+    )
+    mais_recente = cur.fetchone()
+    existe_mais_recente = bool(mais_recente and mais_recente[0] != documento_id)
+    status_revisao = documento["status_revisao"] or "NAO_IDENTIFICADO"
+    confianca = documento["confianca_classificacao"]
+    alertas: list[str] = []
+    if documento["eh_obsoleto"] or status_revisao == "OBSOLETO":
+        status_uso = "LIBERACAO_NAO_RECOMENDADA"
+        alertas.append("Documento marcado como obsoleto.")
+    elif status_revisao == "NAO_IDENTIFICADO" or confianca is None or confianca < 0.50:
+        status_uso = "REQUER_VALIDACAO_TECNICA"
+        alertas.append("Revisão não identificada ou classificação com baixa confiança.")
+    elif existe_mais_recente:
+        status_uso = "REQUER_VALIDACAO_TECNICA"
+    else:
+        status_uso = "POTENCIALMENTE_UTILIZAVEL"
+    if existe_mais_recente:
+        alertas.append(
+            f"Existe outro documento potencialmente mais recente: ID {mais_recente[0]} — {mais_recente[1]}."
+        )
+    recomendacao = (
+        "Não usar como documento executivo sem validação do engenheiro responsável."
+    )
+    linhas = [
+        f"⚠️ Validação documental — Documento {documento_id}", "", "Arquivo:",
+        documento["nome_arquivo"], "", "Status de uso em campo:", status_uso, "",
+        "Motivos:",
+    ]
+    linhas.extend(f"- {alerta}" for alerta in (alertas or ["Nenhum impedimento automático identificado."]))
+    linhas.extend(["", "Recomendação:", recomendacao])
+    return {
+        **documento,
+        "status_uso_campo": status_uso,
+        "alertas": alertas,
+        "recomendacao": recomendacao,
+        "resposta_telegram": "\n".join(linhas),
+        **AGENTE_008_SEGURANCA_CONSULTA,
+    }
+
+
 def _gerar_relatorio_documental(
     cur: Any, obra_codigo: str, incluir_amostras: bool, limite_amostras: int
 ) -> dict[str, Any]:
@@ -2794,12 +3032,55 @@ def relatorio_documental_gestao_operacional(
                     cur, payload.obra_codigo, payload.incluir_amostras,
                     payload.limite_amostras,
                 )
+    except HTTPException:
+        raise
     except Exception as exc:
         raise HTTPException(
             status_code=500,
             detail={"message": "Erro ao gerar relatório documental da obra.", "error": str(exc)},
         )
     return {"ok": True, "agente": "AGENTE_008_GESTAO_OPERACIONAL_OBRA", "mvp": "0.6J", **resultado}
+
+
+@app.post("/agentes/gestao-operacional/ultima-revisao-documental")
+def ultima_revisao_documental_gestao_operacional(
+    payload: GestaoOperacionalUltimaRevisaoDocumentalRequest,
+):
+    try:
+        with get_db_connection() as conn:
+            with conn.cursor() as cur:
+                resultado = _ultima_revisao_documental(
+                    cur, payload.obra_codigo, payload.disciplina,
+                    payload.area, payload.limite_candidatos,
+                )
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(
+            status_code=500,
+            detail={
+                "message": "Erro ao consultar última revisão documental.",
+                "error": str(exc),
+            },
+        )
+    return {"ok": True, "agente": "AGENTE_008_GESTAO_OPERACIONAL_OBRA", "mvp": "0.6K", **resultado}
+
+
+@app.post("/agentes/gestao-operacional/validar-documento-campo")
+def validar_documento_campo_gestao_operacional(
+    payload: GestaoOperacionalValidarDocumentoCampoRequest,
+):
+    try:
+        with get_db_connection() as conn:
+            with conn.cursor() as cur:
+                resultado = _validar_documento_campo(
+                    cur, payload.obra_codigo, payload.documento_id
+                )
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail={"message": "Erro ao validar documento para uso em campo.", "error": str(exc)})
+    return {"ok": True, "agente": "AGENTE_008_GESTAO_OPERACIONAL_OBRA", "mvp": "0.6K", "obra_codigo": payload.obra_codigo, **resultado}
 
 
 @app.post("/agentes/gestao-operacional/classificar-documentos")
@@ -3491,7 +3772,9 @@ def processar_comando_agente_gestao_operacional(
                           'ANALISAR_DOCUMENTO_OBRA',
                           'CLASSIFICAR_DOCUMENTOS_OBRA',
                           'CONSULTAR_DOCUMENTOS_CLASSIFICADOS',
-                          'GERAR_RELATORIO_DOCUMENTAL_OBRA'
+                          'GERAR_RELATORIO_DOCUMENTAL_OBRA',
+                          'CONSULTAR_ULTIMA_REVISAO_DOCUMENTAL',
+                          'VALIDAR_DOCUMENTO_CAMPO'
                       )
                       AND ce.status = 'PENDENTE'
                       AND (%(id_comando)s::uuid IS NULL OR ce.id_comando = %(id_comando)s::uuid)
@@ -3545,6 +3828,18 @@ def processar_comando_agente_gestao_operacional(
                         bool(payload_relatorio.get("incluir_amostras", True)),
                         int(payload_relatorio.get("limite_amostras", 5)),
                     )
+                elif comando["tipo_comando"] == "CONSULTAR_ULTIMA_REVISAO_DOCUMENTAL":
+                    payload_revisao = comando["payload_comando"] or {}
+                    resultado = _ultima_revisao_documental(
+                        cur, comando["obra_codigo"], payload_revisao.get("disciplina"),
+                        payload_revisao.get("area"),
+                        int(payload_revisao.get("limite_candidatos", 10)),
+                    )
+                elif comando["tipo_comando"] == "VALIDAR_DOCUMENTO_CAMPO":
+                    resultado = _validar_documento_campo(
+                        cur, comando["obra_codigo"],
+                        int((comando["payload_comando"] or {})["documento_id"]),
+                    )
                 else:
                     resultado = _resultado_consulta_documentos_classificados(
                         cur, comando["obra_codigo"], comando["payload_comando"]
@@ -3596,7 +3891,7 @@ def processar_comando_agente_gestao_operacional(
     return {
         "ok": True,
         "agente": "AGENTE_008_GESTAO_OPERACIONAL_OBRA",
-        "mvp": "0.6J",
+        "mvp": "0.6K",
         "status_comando": "CONCLUIDO",
         "id_comando": str(comando["id_comando"]),
         "tipo_comando": comando["tipo_comando"],
@@ -3800,6 +4095,8 @@ async def receber_entrada_telegram(
         "CLASSIFICAR_DOCUMENTOS_OBRA",
         "CONSULTAR_DOCUMENTOS_CLASSIFICADOS",
         "GERAR_RELATORIO_DOCUMENTAL_OBRA",
+        "CONSULTAR_ULTIMA_REVISAO_DOCUMENTAL",
+        "VALIDAR_DOCUMENTO_CAMPO",
     }
     obra_codigo = payload.obra_codigo or "OBRA-CAIO"
     normalized = {
@@ -4294,6 +4591,18 @@ async def receber_entrada_telegram(
                             "obra_codigo": obra_codigo,
                             "incluir_amostras": True,
                             "limite_amostras": 5,
+                        }
+                    elif classificacao["tipo_comando"] == "CONSULTAR_ULTIMA_REVISAO_DOCUMENTAL":
+                        payload_comando = {
+                            "obra_codigo": obra_codigo,
+                            **extrair_ultima_revisao_telegram(normalized["conteudo"]),
+                            **AGENTE_008_SEGURANCA_CONSULTA,
+                        }
+                    elif classificacao["tipo_comando"] == "VALIDAR_DOCUMENTO_CAMPO":
+                        payload_comando = {
+                            "obra_codigo": obra_codigo,
+                            **extrair_documento_id_telegram(normalized["conteudo"]),
+                            **AGENTE_008_SEGURANCA_CONSULTA,
                         }
 
                 cur.execute(
