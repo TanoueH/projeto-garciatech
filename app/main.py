@@ -2745,8 +2745,11 @@ def _ultima_revisao_documental(
     }
     filtros = """
         c.obra_codigo = %(obra_codigo)s
-        AND (%(disciplina)s IS NULL OR c.disciplina_detectada = %(disciplina)s)
-        AND (%(area)s IS NULL OR c.area_detectada = %(area)s)
+        AND (
+            %(disciplina)s::text IS NULL
+            OR c.disciplina_detectada = %(disciplina)s::text
+        )
+        AND (%(area)s::text IS NULL OR c.area_detectada = %(area)s::text)
     """
     cur.execute(
         f"""
@@ -2769,7 +2772,7 @@ def _ultima_revisao_documental(
         WHERE {filtros} AND c.eh_obsoleto IS NOT TRUE
         ORDER BY c.data_revisao_detectada DESC NULLS LAST,
                  c.numero_revisao DESC NULLS LAST, c.documento_id DESC
-        LIMIT %(limite)s;
+        LIMIT %(limite)s::int;
         """,
         params,
     )
