@@ -4,7 +4,8 @@ import re
 import json
 import os
 import uuid
-from datetime import datetime, timezone
+import unicodedata
+from datetime import date, datetime, timezone
 from io import BytesIO
 from pathlib import Path
 from urllib.parse import urlparse
@@ -204,6 +205,23 @@ class GestaoOperacionalDocumentosIndexadosRequest(BaseModel):
     limite: int = Field(default=50, ge=1, le=200)
 
 
+class GestaoOperacionalClassificarDocumentosRequest(BaseModel):
+    obra_codigo: str
+    limite: int = Field(default=200, ge=1, le=1000)
+    reprocessar: bool = False
+
+
+class GestaoOperacionalDocumentosClassificadosRequest(BaseModel):
+    obra_codigo: str
+    area: str | None = None
+    disciplina: str | None = None
+    status_revisao: str | None = None
+    eh_obsoleto: bool | None = None
+    eh_as_built: bool | None = None
+    termo: str | None = None
+    limite: int = Field(default=50, ge=1, le=200)
+
+
 def get_db_connection():
     if not DATABASE_URL:
         raise RuntimeError("DATABASE_URL não definida.")
@@ -368,6 +386,31 @@ def classificar_intencao_executiva(conteudo: Optional[str]) -> dict[str, Any]:
         "listar documentos da obra",
     ]
     texto_comando = re.sub(r"\s+", " ", texto.strip().rstrip("?.!"))
+    texto_comando_normalizado = normalizar_texto_comparacao(texto_comando)
+    if texto_comando_normalizado in {"classificar documentos", "reclassificar documentos"}:
+        return {
+            "intencao": "CLASSIFICAR_DOCUMENTOS_OBRA",
+            "agente_destino": "AGENTE_008_GESTAO_OPERACIONAL_OBRA",
+            "tipo_comando": "CLASSIFICAR_DOCUMENTOS_OBRA",
+            "requer_aprovacao": False,
+            "confianca": 0.98,
+            "justificativa": "Classificação determinística de metadados documentais, sem acesso ou alteração no MinIO.",
+        }
+    comandos_classificados = {
+        "documentos obsoletos", "listar documentos obsoletos", "tem as built",
+        "documentos as built", "ultima revisao luminotecnico",
+        "documentos do refeitorio", "documentos refeitorio",
+        "documentos de hidraulica", "documentos de eletrica", "documentos luminotecnico",
+    }
+    if texto_comando_normalizado in comandos_classificados:
+        return {
+            "intencao": "CONSULTAR_DOCUMENTOS_CLASSIFICADOS",
+            "agente_destino": "AGENTE_008_GESTAO_OPERACIONAL_OBRA",
+            "tipo_comando": "CONSULTAR_DOCUMENTOS_CLASSIFICADOS",
+            "requer_aprovacao": False,
+            "confianca": 0.97,
+            "justificativa": "Consulta somente leitura da classificação documental técnica da obra.",
+        }
     if re.fullmatch(
         r"(?:analisar|resumir|verificar)\s+(?:documento|projeto)\s+.+",
         texto_comando,
@@ -729,6 +772,28 @@ def extrair_filtros_documentos_telegram(conteudo: Optional[str]) -> dict[str, Op
     return {"disciplina": disciplina, "extensao": extensao, "termo": termo}
 
 
+def extrair_filtros_classificacao_telegram(conteudo: Optional[str]) -> dict[str, Any]:
+    texto = normalizar_texto_comparacao(conteudo)
+    filtros: dict[str, Any] = {}
+    if "obsoleto" in texto:
+        filtros["eh_obsoleto"] = True
+    if re.search(r"\bas built\b", texto):
+        filtros["eh_as_built"] = True
+    if "refeitorio" in texto:
+        filtros["area"] = "refeitorio"
+    for termo, disciplina in (
+        ("hidraulica", "hidraulica"),
+        ("eletrica", "eletrica"),
+        ("luminotecnico", "luminotecnico"),
+    ):
+        if termo in texto:
+            filtros["disciplina"] = disciplina
+            break
+    if texto.startswith("ultima revisao"):
+        filtros["modo"] = "ULTIMA_REVISAO"
+    return filtros
+
+
 def montar_resposta_documentos_resumo_telegram(obra_codigo: str) -> str:
     with get_db_connection() as conn:
         with conn.cursor() as cur:
@@ -811,6 +876,122 @@ def serialize_date(value: Any) -> Optional[str]:
 
 def serialize_numeric(value: Any) -> float:
     return float(value or 0)
+
+
+def normalizar_texto_comparacao(valor: Optional[str]) -> str:
+    """Normaliza somente para comparação; o valor original nunca é modificado."""
+    texto = unicodedata.normalize("NFKD", valor or "")
+    texto = "".join(caractere for caractere in texto if not unicodedata.combining(caractere))
+    return re.sub(r"[^a-z0-9]+", " ", texto.casefold()).strip()
+
+
+def classificar_documento_tecnico(
+    nome_arquivo: Optional[str],
+    object_key: Optional[str],
+    pasta_origem: Optional[str],
+    disciplina_original: Optional[str],
+    extensao: Optional[str],
+) -> dict[str, Any]:
+    campos = {
+        "nome_arquivo": nome_arquivo or "",
+        "object_key": object_key or "",
+        "pasta_origem": pasta_origem or "",
+        "disciplina_original": disciplina_original or "",
+        "extensao": extensao or "",
+    }
+    texto = normalizar_texto_comparacao(" ".join(campos.values()))
+    texto_nome_caminho = normalizar_texto_comparacao(
+        f"{campos['nome_arquivo']} {campos['object_key']}"
+    )
+
+    def primeiro_termo(opcoes: list[tuple[str, tuple[str, ...]]]) -> Optional[str]:
+        for valor, termos in opcoes:
+            if any(re.search(rf"\b{re.escape(termo)}\b", texto) for termo in termos):
+                return valor
+        return None
+
+    area = primeiro_termo([
+        ("refeitorio", ("refeitorio",)),
+        ("sala_de_jogos", ("sala de jogos",)),
+        ("area_1", ("area 1",)),
+        ("area_2", ("area 2",)),
+        ("area_3", ("area 3",)),
+        ("cozinha", ("cozinha",)),
+        ("sanitario", ("sanitario", "banheiro")),
+        ("geral", ("geral",)),
+    ])
+    disciplina = primeiro_termo([
+        ("deteccao_e_alarme", ("deteccao e alarme", "incendio")),
+        ("luminotecnico", ("luminotecnico",)),
+        ("terraplanagem", ("terraplanagem",)),
+        ("topografia", ("topografia",)),
+        ("renderizacao", ("renderizacao",)),
+        ("arquitetura", ("arquitetura",)),
+        ("estrutura", ("estrutura",)),
+        ("eletrica", ("eletrica",)),
+        ("hidraulica", ("hidraulica",)),
+        ("forros", ("forros", "forro")),
+    ])
+
+    if re.search(r"\b(?:obsoleto|obsolete)\b", texto_nome_caminho):
+        status_revisao = "OBSOLETO"
+    elif re.search(r"\b(?:as built|asbult|as bult|asbuilt)\b", texto_nome_caminho):
+        status_revisao = "AS_BUILT"
+    elif re.search(r"\b(?:alteracao|alteracoes|alterado|revisado)\b", texto_nome_caminho):
+        status_revisao = "ALTERACAO"
+    elif re.search(r"\bpre executivo\b", texto_nome_caminho):
+        status_revisao = "PRE_EXECUTIVO"
+    elif re.search(r"\bexecutivo\b", texto_nome_caminho):
+        status_revisao = "EXECUTIVO"
+    else:
+        status_revisao = "NAO_IDENTIFICADO"
+
+    data_revisao = None
+    data_encontrada = re.search(r"(?<!\d)(\d{2})[.\-/](\d{2})[.\-/](\d{4})(?!\d)", " ".join(campos.values()))
+    if data_encontrada:
+        try:
+            data_revisao = date(
+                int(data_encontrada.group(3)),
+                int(data_encontrada.group(2)),
+                int(data_encontrada.group(1)),
+            )
+        except ValueError:
+            data_revisao = None
+
+    revisao_encontrada = re.search(
+        r"\b(?:r\s*|rev(?:isao)?\s*)(\d{1,3})\b", texto, flags=re.IGNORECASE
+    )
+    numero_revisao = f"R{int(revisao_encontrada.group(1)):02d}" if revisao_encontrada else None
+    palavras_chave = [
+        valor for valor in (area, disciplina, status_revisao if status_revisao != "NAO_IDENTIFICADO" else None, numero_revisao)
+        if valor
+    ]
+    criterios = {
+        "area": area is not None,
+        "disciplina": disciplina is not None,
+        "status_revisao": status_revisao != "NAO_IDENTIFICADO",
+        "data_revisao": data_revisao is not None,
+        "numero_revisao": numero_revisao is not None,
+        "campos_avaliados": list(campos),
+    }
+    confianca = 0.30
+    confianca += 0.15 if area else 0
+    confianca += 0.20 if disciplina else 0
+    confianca += 0.15 if status_revisao != "NAO_IDENTIFICADO" else 0
+    confianca += 0.10 if data_revisao else 0
+    confianca += 0.10 if numero_revisao else 0
+    return {
+        "area_detectada": area,
+        "disciplina_detectada": disciplina,
+        "status_revisao": status_revisao,
+        "data_revisao_detectada": data_revisao,
+        "eh_obsoleto": status_revisao == "OBSOLETO",
+        "eh_as_built": status_revisao == "AS_BUILT",
+        "numero_revisao": numero_revisao,
+        "palavras_chave": palavras_chave[:6],
+        "criterios_detectados": criterios,
+        "confianca_classificacao": min(round(confianca, 2), 1.00),
+    }
 
 
 def fetch_status_counts(conn, table_name: str, status_column: str, obra_codigo: str) -> dict[str, int]:
@@ -2311,6 +2492,175 @@ def area_status_gestao_operacional(payload: GestaoOperacionalAreaRequest):
     }
 
 
+def _classificar_documentos_obra(
+    cur: Any, obra_codigo: str, limite: int, reprocessar: bool
+) -> dict[str, Any]:
+    cur.execute(
+        """
+        SELECT COUNT(*)
+        FROM classificacoes_documentais_obra AS c
+        JOIN documentos_minio_obra AS d ON d.id = c.documento_id
+        WHERE d.obra_codigo = %(obra_codigo)s;
+        """,
+        {"obra_codigo": obra_codigo},
+    )
+    total_ja_classificado = cur.fetchone()[0]
+    cur.execute(
+        """
+        SELECT d.id, d.nome_arquivo, d.object_key, d.pasta_origem,
+               d.disciplina_original, d.extensao,
+               (c.documento_id IS NOT NULL) AS ja_classificado
+        FROM documentos_minio_obra AS d
+        LEFT JOIN classificacoes_documentais_obra AS c ON c.documento_id = d.id
+        WHERE d.obra_codigo = %(obra_codigo)s
+          AND (%(reprocessar)s OR c.documento_id IS NULL)
+        ORDER BY d.id
+        LIMIT %(limite)s;
+        """,
+        {"obra_codigo": obra_codigo, "reprocessar": reprocessar, "limite": limite},
+    )
+    documentos = cur.fetchall()
+    resumo_disciplina: dict[str, int] = {}
+    resumo_area: dict[str, int] = {}
+    resumo_status: dict[str, int] = {}
+    total_classificado = 0
+    for documento in documentos:
+        classificacao = classificar_documento_tecnico(*documento[1:6])
+        cur.execute(
+            """
+            INSERT INTO classificacoes_documentais_obra (
+                documento_id, obra_codigo, area_detectada, disciplina_detectada,
+                status_revisao, data_revisao_detectada, eh_obsoleto, eh_as_built,
+                numero_revisao, palavras_chave, criterios_detectados,
+                confianca_classificacao
+            ) VALUES (
+                %(documento_id)s, %(obra_codigo)s, %(area_detectada)s,
+                %(disciplina_detectada)s, %(status_revisao)s,
+                %(data_revisao_detectada)s, %(eh_obsoleto)s, %(eh_as_built)s,
+                %(numero_revisao)s, %(palavras_chave)s, %(criterios_detectados)s,
+                %(confianca_classificacao)s
+            )
+            ON CONFLICT (documento_id) DO UPDATE SET
+                obra_codigo = EXCLUDED.obra_codigo,
+                area_detectada = EXCLUDED.area_detectada,
+                disciplina_detectada = EXCLUDED.disciplina_detectada,
+                status_revisao = EXCLUDED.status_revisao,
+                data_revisao_detectada = EXCLUDED.data_revisao_detectada,
+                eh_obsoleto = EXCLUDED.eh_obsoleto,
+                eh_as_built = EXCLUDED.eh_as_built,
+                numero_revisao = EXCLUDED.numero_revisao,
+                palavras_chave = EXCLUDED.palavras_chave,
+                criterios_detectados = EXCLUDED.criterios_detectados,
+                confianca_classificacao = EXCLUDED.confianca_classificacao,
+                metodo_classificacao = 'REGRA_NOME_CAMINHO',
+                status = 'CLASSIFICADO', atualizado_em = NOW();
+            """,
+            {
+                "documento_id": documento[0],
+                "obra_codigo": obra_codigo,
+                **classificacao,
+                "palavras_chave": Json(classificacao["palavras_chave"]),
+                "criterios_detectados": Json(classificacao["criterios_detectados"]),
+            },
+        )
+        total_classificado += 1
+        for resumo, chave in (
+            (resumo_disciplina, classificacao["disciplina_detectada"] or "nao_identificada"),
+            (resumo_area, classificacao["area_detectada"] or "nao_identificada"),
+            (resumo_status, classificacao["status_revisao"]),
+        ):
+            resumo[chave] = resumo.get(chave, 0) + 1
+
+    return {
+        "total_processado": len(documentos),
+        "total_classificado": total_classificado,
+        "total_ignorados": 0 if reprocessar else total_ja_classificado,
+        "resumo_por_disciplina": resumo_disciplina,
+        "resumo_por_area": resumo_area,
+        "resumo_por_status_revisao": resumo_status,
+    }
+
+
+def _consultar_documentos_classificados(
+    cur: Any, obra_codigo: str, filtros: dict[str, Any], modo: Optional[str] = None
+) -> list[dict[str, Any]]:
+    clausulas = ["c.obra_codigo = %(obra_codigo)s"]
+    params: dict[str, Any] = {"obra_codigo": obra_codigo, "limite": filtros["limite"]}
+    for campo_payload, campo_sql in (
+        ("area", "area_detectada"),
+        ("disciplina", "disciplina_detectada"),
+        ("status_revisao", "status_revisao"),
+    ):
+        valor = filtros.get(campo_payload)
+        if valor:
+            clausulas.append(f"c.{campo_sql} = %({campo_payload})s")
+            params[campo_payload] = normalizar_texto_comparacao(str(valor)).replace(" ", "_")
+            if campo_payload == "status_revisao":
+                params[campo_payload] = str(valor).upper()
+    for campo in ("eh_obsoleto", "eh_as_built"):
+        if filtros.get(campo) is not None:
+            clausulas.append(f"c.{campo} = %({campo})s")
+            params[campo] = filtros[campo]
+    if filtros.get("termo"):
+        clausulas.append("(d.nome_arquivo ILIKE %(termo)s OR d.object_key ILIKE %(termo)s)")
+        params["termo"] = f"%{str(filtros['termo']).strip()}%"
+    ordenacao = (
+        "c.data_revisao_detectada DESC NULLS LAST, c.numero_revisao DESC NULLS LAST, d.id DESC"
+        if modo == "ULTIMA_REVISAO"
+        else "d.id DESC"
+    )
+    cur.execute(
+        f"""
+        SELECT d.id, d.nome_arquivo, d.extensao, c.area_detectada,
+               c.disciplina_detectada, c.status_revisao, c.data_revisao_detectada,
+               c.eh_obsoleto, c.eh_as_built, c.numero_revisao,
+               c.confianca_classificacao, d.bucket, d.object_key
+        FROM classificacoes_documentais_obra AS c
+        JOIN documentos_minio_obra AS d ON d.id = c.documento_id
+        WHERE {" AND ".join(clausulas)}
+        ORDER BY {ordenacao}
+        LIMIT %(limite)s;
+        """,
+        params,
+    )
+    return [
+        {
+            "documento_id": row[0], "nome_arquivo": row[1], "extensao": row[2],
+            "area_detectada": row[3], "disciplina_detectada": row[4],
+            "status_revisao": row[5], "data_revisao_detectada": serialize_date(row[6]),
+            "eh_obsoleto": row[7], "eh_as_built": row[8], "numero_revisao": row[9],
+            "confianca_classificacao": serialize_numeric(row[10]),
+            "minio_uri": f"s3://{row[11]}/{row[12]}",
+        }
+        for row in cur.fetchall()
+    ]
+
+
+@app.post("/agentes/gestao-operacional/classificar-documentos")
+def classificar_documentos_gestao_operacional(payload: GestaoOperacionalClassificarDocumentosRequest):
+    try:
+        with get_db_connection() as conn:
+            with conn.cursor() as cur:
+                resultado = _classificar_documentos_obra(
+                    cur, payload.obra_codigo, payload.limite, payload.reprocessar
+                )
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail={"message": "Erro ao classificar documentos da obra.", "error": str(exc)})
+    return {"ok": True, "agente": "AGENTE_008_GESTAO_OPERACIONAL_OBRA", "mvp": "0.6I", "obra_codigo": payload.obra_codigo, **AGENTE_008_SEGURANCA_CONSULTA, **resultado}
+
+
+@app.post("/agentes/gestao-operacional/documentos-classificados")
+def documentos_classificados_gestao_operacional(payload: GestaoOperacionalDocumentosClassificadosRequest):
+    filtros = payload.model_dump(exclude={"obra_codigo"})
+    try:
+        with get_db_connection() as conn:
+            with conn.cursor() as cur:
+                documentos = _consultar_documentos_classificados(cur, payload.obra_codigo, filtros)
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail={"message": "Erro ao consultar documentos classificados.", "error": str(exc)})
+    return {"ok": True, "agente": "AGENTE_008_GESTAO_OPERACIONAL_OBRA", "mvp": "0.6I", "obra_codigo": payload.obra_codigo, **AGENTE_008_SEGURANCA_CONSULTA, "total_retornado": len(documentos), "documentos": documentos}
+
+
 @app.post("/agentes/gestao-operacional/documentos-resumo")
 def documentos_resumo_gestao_operacional(
     payload: GestaoOperacionalDocumentosResumoRequest,
@@ -2593,6 +2943,76 @@ def _resultado_documentos_indexados(
         "documentos": documentos,
         "filtros": filtros,
         "ha_mais_resultados": ha_mais_resultados,
+        **AGENTE_008_SEGURANCA_CONSULTA,
+    }
+
+
+def _resultado_classificacao_documental(
+    cur: Any, obra_codigo: str, payload_comando: Any
+) -> dict[str, Any]:
+    payload = payload_comando if isinstance(payload_comando, dict) else {}
+    try:
+        limite = max(1, min(int(payload.get("limite", 200)), 1000))
+    except (TypeError, ValueError):
+        limite = 200
+    resultado = _classificar_documentos_obra(
+        cur, obra_codigo, limite, bool(payload.get("reprocessar", False))
+    )
+    return {
+        "tipo_resultado": "CLASSIFICACAO_DOCUMENTAL_OBRA",
+        "resposta_telegram": (
+            "Classificação documental concluída. "
+            f"{resultado['total_classificado']} documentos classificados; "
+            f"{resultado['total_ignorados']} ignorados."
+        ),
+        **resultado,
+        **AGENTE_008_SEGURANCA_CONSULTA,
+    }
+
+
+def _resultado_consulta_documentos_classificados(
+    cur: Any, obra_codigo: str, payload_comando: Any
+) -> dict[str, Any]:
+    payload = payload_comando if isinstance(payload_comando, dict) else {}
+    modo = payload.get("modo")
+    filtros = {
+        "area": payload.get("area"), "disciplina": payload.get("disciplina"),
+        "status_revisao": payload.get("status_revisao"),
+        "eh_obsoleto": payload.get("eh_obsoleto"),
+        "eh_as_built": payload.get("eh_as_built"),
+        "termo": payload.get("termo"),
+        "limite": 1 if modo == "ULTIMA_REVISAO" else 10,
+    }
+    documentos = _consultar_documentos_classificados(cur, obra_codigo, filtros, modo)
+    if not documentos:
+        resposta = "Não encontrei documentos classificados para esse filtro."
+    else:
+        linhas = [
+            "Última revisão encontrada:"
+            if modo == "ULTIMA_REVISAO"
+            else "Documentos classificados:"
+        ]
+        for documento in documentos:
+            nome = documento["nome_arquivo"] or "Sem nome"
+            nome = nome if len(nome) <= 70 else f"{nome[:67]}..."
+            revisao = (
+                documento["numero_revisao"]
+                or documento["data_revisao_detectada"]
+                or "sem revisão/data"
+            )
+            linhas.append(
+                f"• #{documento['documento_id']} {nome}\n"
+                f"  {documento['disciplina_detectada'] or 'sem disciplina'} | "
+                f"{documento['area_detectada'] or 'sem área'} | "
+                f"{documento['status_revisao']} | {revisao}"
+            )
+        if modo == "ULTIMA_REVISAO" and documentos[0]["confianca_classificacao"] < 0.60:
+            linhas.append("⚠️ Candidato com baixa confiança; confirme manualmente.")
+        resposta = "\n".join(linhas)
+    return {
+        "tipo_resultado": "CONSULTA_DOCUMENTOS_CLASSIFICADOS",
+        "resposta_telegram": resposta, "total_retornado": len(documentos),
+        "documentos": documentos, "filtros": filtros, "modo": modo,
         **AGENTE_008_SEGURANCA_CONSULTA,
     }
 
@@ -2902,7 +3322,9 @@ def processar_comando_agente_gestao_operacional(
                       AND ce.tipo_comando IN (
                           'CONSULTAR_DOCUMENTOS_OBRA_RESUMO',
                           'CONSULTAR_DOCUMENTOS_OBRA_INDEXADOS',
-                          'ANALISAR_DOCUMENTO_OBRA'
+                          'ANALISAR_DOCUMENTO_OBRA',
+                          'CLASSIFICAR_DOCUMENTOS_OBRA',
+                          'CONSULTAR_DOCUMENTOS_CLASSIFICADOS'
                       )
                       AND ce.status = 'PENDENTE'
                       AND (%(id_comando)s::uuid IS NULL OR ce.id_comando = %(id_comando)s::uuid)
@@ -2918,7 +3340,7 @@ def processar_comando_agente_gestao_operacional(
                     return {
                         "ok": True,
                         "agente": "AGENTE_008_GESTAO_OPERACIONAL_OBRA",
-                        "mvp": "0.6H",
+                        "mvp": "0.6I",
                         "status": "SEM_COMANDO_PENDENTE",
                         "message": (
                             "Nenhum comando PENDENTE para "
@@ -2940,8 +3362,16 @@ def processar_comando_agente_gestao_operacional(
                     resultado = _resultado_documentos_indexados(
                         cur, comando["obra_codigo"], comando["payload_comando"]
                     )
-                else:
+                elif comando["tipo_comando"] == "ANALISAR_DOCUMENTO_OBRA":
                     resultado = _resultado_analise_documental(
+                        cur, comando["obra_codigo"], comando["payload_comando"]
+                    )
+                elif comando["tipo_comando"] == "CLASSIFICAR_DOCUMENTOS_OBRA":
+                    resultado = _resultado_classificacao_documental(
+                        cur, comando["obra_codigo"], comando["payload_comando"]
+                    )
+                else:
+                    resultado = _resultado_consulta_documentos_classificados(
                         cur, comando["obra_codigo"], comando["payload_comando"]
                     )
 
@@ -2991,7 +3421,7 @@ def processar_comando_agente_gestao_operacional(
     return {
         "ok": True,
         "agente": "AGENTE_008_GESTAO_OPERACIONAL_OBRA",
-        "mvp": "0.6H",
+        "mvp": "0.6I",
         "status_comando": "CONCLUIDO",
         "id_comando": str(comando["id_comando"]),
         "tipo_comando": comando["tipo_comando"],
@@ -3192,6 +3622,8 @@ async def receber_entrada_telegram(
         "CONSULTAR_DOCUMENTOS_OBRA_RESUMO",
         "CONSULTAR_DOCUMENTOS_OBRA_INDEXADOS",
         "ANALISAR_DOCUMENTO_OBRA",
+        "CLASSIFICAR_DOCUMENTOS_OBRA",
+        "CONSULTAR_DOCUMENTOS_CLASSIFICADOS",
     }
     obra_codigo = payload.obra_codigo or "OBRA-CAIO"
     normalized = {
@@ -3669,6 +4101,17 @@ async def receber_entrada_telegram(
                     elif classificacao["tipo_comando"] == "ANALISAR_DOCUMENTO_OBRA":
                         payload_comando.update(
                             extrair_alvo_analise_documental(normalized["conteudo"])
+                        )
+                    elif classificacao["tipo_comando"] == "CLASSIFICAR_DOCUMENTOS_OBRA":
+                        payload_comando.update({
+                            "obra_codigo": obra_codigo,
+                            "reprocessar": normalizar_texto_comparacao(
+                                normalized["conteudo"]
+                            ).startswith("reclassificar"),
+                        })
+                    elif classificacao["tipo_comando"] == "CONSULTAR_DOCUMENTOS_CLASSIFICADOS":
+                        payload_comando.update(
+                            extrair_filtros_classificacao_telegram(normalized["conteudo"])
                         )
 
                 cur.execute(
