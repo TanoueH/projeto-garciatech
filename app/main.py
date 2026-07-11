@@ -400,7 +400,8 @@ def classificar_intencao_executiva(conteudo: Optional[str]) -> dict[str, Any]:
         "documentos obsoletos", "listar documentos obsoletos", "tem as built",
         "documentos as built", "ultima revisao luminotecnico",
         "documentos do refeitorio", "documentos refeitorio",
-        "documentos de hidraulica", "documentos de eletrica", "documentos luminotecnico",
+        "documentos de hidraulica", "documentos de hidralica", "documentos de hidr",
+        "documentos de eletrica", "documentos luminotecnico",
     }
     if texto_comando_normalizado in comandos_classificados:
         return {
@@ -751,17 +752,16 @@ def extrair_alvo_analise_documental(conteudo: Optional[str]) -> dict[str, Any]:
 
 
 def extrair_filtros_documentos_telegram(conteudo: Optional[str]) -> dict[str, Optional[str]]:
-    texto = re.sub(r"\s+", " ", (conteudo or "").lower().strip().rstrip("?.!"))
+    texto = normalizar_texto_comparacao(conteudo)
     disciplina = None
     for termo, valor in (
         ("arquitetura", "arquitetura"),
         ("eletrica", "eletrica"),
-        ("elétrica", "eletrica"),
         ("hidraulica", "hidraulica"),
-        ("hidráulica", "hidraulica"),
+        ("hidralica", "hidraulica"),
+        ("hidr", "hidraulica"),
         ("estrutura", "estrutura"),
         ("luminotecnico", "luminotecnico"),
-        ("luminotécnico", "luminotecnico"),
     ):
         if termo in texto:
             disciplina = valor
@@ -783,6 +783,8 @@ def extrair_filtros_classificacao_telegram(conteudo: Optional[str]) -> dict[str,
         filtros["area"] = "refeitorio"
     for termo, disciplina in (
         ("hidraulica", "hidraulica"),
+        ("hidralica", "hidraulica"),
+        ("hidr", "hidraulica"),
         ("eletrica", "eletrica"),
         ("luminotecnico", "luminotecnico"),
     ):
@@ -929,7 +931,7 @@ def classificar_documento_tecnico(
         ("arquitetura", ("arquitetura",)),
         ("estrutura", ("estrutura",)),
         ("eletrica", ("eletrica",)),
-        ("hidraulica", ("hidraulica",)),
+        ("hidraulica", ("hidraulica", "hidralica", "hidr")),
         ("forros", ("forros", "forro")),
     ])
 
