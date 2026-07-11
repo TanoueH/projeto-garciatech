@@ -262,6 +262,14 @@ class GestaoOperacionalValidarDocumentoCampoRequest(BaseModel):
     documento_id: int = Field(gt=0)
 
 
+class GestaoOperacionalDiagnosticoRequest(BaseModel):
+    obra_codigo: str
+    area: str | None = None
+    incluir_documentos: bool = True
+    incluir_pendencias: bool = True
+    incluir_restricoes: bool = True
+
+
 def get_db_connection():
     if not DATABASE_URL:
         raise RuntimeError("DATABASE_URL não definida.")
@@ -427,6 +435,21 @@ def classificar_intencao_executiva(conteudo: Optional[str]) -> dict[str, Any]:
     ]
     texto_comando = re.sub(r"\s+", " ", texto.strip().rstrip("?.!"))
     texto_comando_normalizado = normalizar_texto_comparacao(texto_comando)
+    comandos_diagnostico_operacional = {
+        "diagnostico operacional da obra", "situacao operacional da obra",
+        "status operacional da obra", "como esta a obra", "risco operacional da obra",
+        "diagnostico operacional do refeitorio", "status do refeitorio",
+        "o que impede o avanco do refeitorio",
+    }
+    if texto_comando_normalizado in comandos_diagnostico_operacional:
+        return {
+            "intencao": "GERAR_DIAGNOSTICO_OPERACIONAL_OBRA",
+            "agente_destino": "AGENTE_008_GESTAO_OPERACIONAL_OBRA",
+            "tipo_comando": "GERAR_DIAGNOSTICO_OPERACIONAL_OBRA",
+            "requer_aprovacao": False,
+            "confianca": 0.98,
+            "justificativa": "Diagnóstico operacional consultivo, sem liberação de frente ou alteração externa.",
+        }
     comandos_plano_saneamento = {
         "gerar plano de saneamento documental",
         "plano de saneamento documental",
@@ -960,6 +983,15 @@ def extrair_riscos_documentais_telegram(conteudo: Optional[str]) -> dict[str, An
             disciplina = valor
             break
     return {"area": area, "disciplina": disciplina, "limite_amostras": 10}
+
+
+def extrair_area_diagnostico_operacional(conteudo: Optional[str]) -> Optional[str]:
+    texto = normalizar_texto_comparacao(conteudo)
+    if "sala de jogos" in texto:
+        return "sala_de_jogos"
+    if "refeitorio" in texto:
+        return "refeitorio"
+    return None
 
 
 def extrair_pendencia_documental_telegram(conteudo: Optional[str]) -> dict[str, Any]:
@@ -4264,6 +4296,225 @@ def _resultado_analise_documental(
     }
 
 
+def _colunas_tabela_operacional(cur, tabela: str) -> set[str]:
+    cur.execute(
+        """
+        SELECT column_name FROM information_schema.columns
+        WHERE table_schema = 'public' AND table_name = %s;
+        """,
+        (tabela,),
+    )
+    return {row[0] for row in cur.fetchall()}
+
+
+def _linhas_fonte_operacional(
+    cur, tabela: str, colunas_desejadas: list[str], obra_codigo: str
+) -> tuple[list[dict[str, Any]], Optional[str]]:
+    """Lê apenas colunas conhecidas; incompatibilidades ficam isoladas por savepoint."""
+    try:
+        with cur.connection.transaction():
+            colunas = _colunas_tabela_operacional(cur, tabela)
+            if not colunas:
+                return [], "tabela ausente"
+            selecionadas = [coluna for coluna in colunas_desejadas if coluna in colunas]
+            if "obra_codigo" not in colunas:
+                return [], "coluna obra_codigo ausente"
+            if not selecionadas:
+                return [], "schema sem colunas compatíveis"
+            cur.execute(
+                f"SELECT {', '.join(selecionadas)} FROM {tabela} WHERE obra_codigo = %s",
+                (obra_codigo,),
+            )
+            return [dict(zip(selecionadas, row)) for row in cur.fetchall()], None
+    except Exception as exc:
+        return [], f"fonte indisponível: {str(exc)[:120]}"
+
+
+def _texto_curto(valor: Any, limite: int = 120) -> str:
+    texto = re.sub(r"\s+", " ", str(valor or "")).strip()
+    return texto if len(texto) <= limite else f"{texto[: limite - 1].rstrip()}…"
+
+
+def _gerar_diagnostico_operacional(
+    cur, obra_codigo: str, area: Optional[str], incluir_documentos: bool,
+    incluir_pendencias: bool, incluir_restricoes: bool,
+) -> dict[str, Any]:
+    fontes_consultadas: list[str] = []
+    indisponibilidades: list[str] = []
+
+    def ler(tabela: str, colunas: list[str], habilitada: bool = True) -> list[dict[str, Any]]:
+        if not habilitada:
+            return []
+        linhas, erro = _linhas_fonte_operacional(cur, tabela, colunas, obra_codigo)
+        fontes_consultadas.append(tabela)
+        if erro:
+            indisponibilidades.append(f"{tabela}: {_texto_curto(erro, 90)}")
+        return linhas
+
+    areas = ler("areas_obra", ["codigo_area", "nome_area", "ativo"])
+    ler("eap_obra", ["codigo_eap", "descricao", "ativo"])
+    atividades = ler(
+        "atividades_cronograma",
+        ["id", "codigo_area", "frente_servico", "status_atividade", "descricao"],
+    )
+    restricoes = ler(
+        "restricoes_atividade",
+        ["atividade_id", "codigo_area", "area", "status_restricao", "status", "descricao", "criticidade"],
+        incluir_restricoes,
+    )
+    pendencias = ler(
+        "pendencias_obra",
+        ["codigo_area", "area", "area_detectada", "status_pendencia", "status", "descricao", "titulo", "criticidade"],
+        incluir_pendencias,
+    )
+    ler("documentos_minio_obra", ["id", "nome_arquivo"], incluir_documentos)
+    classificacoes = ler(
+        "classificacoes_documentais_obra",
+        ["area_detectada", "status_revisao", "eh_obsoleto", "confianca_classificacao", "status"],
+        incluir_documentos,
+    )
+
+    atividade_area = {item.get("id"): item.get("codigo_area") for item in atividades}
+
+    def area_item(item: dict[str, Any], restricao: bool = False) -> Optional[str]:
+        valor = item.get("codigo_area") or item.get("area") or item.get("area_detectada")
+        if not valor and restricao:
+            valor = atividade_area.get(item.get("atividade_id"))
+        return normalizar_texto_comparacao(str(valor)).replace(" ", "_") if valor else None
+
+    filtro_area = normalizar_texto_comparacao(area).replace(" ", "_") if area else None
+    if filtro_area:
+        classificacoes = [item for item in classificacoes if area_item(item) == filtro_area]
+        pendencias = [item for item in pendencias if area_item(item) == filtro_area]
+        restricoes = [item for item in restricoes if area_item(item, True) == filtro_area]
+
+    status_fechados = {"CONCLUIDO", "CONCLUIDA", "RESOLVIDO", "RESOLVIDA", "FECHADO", "FECHADA", "ENCERRADO", "ENCERRADA", "CANCELADO", "CANCELADA", "LIBERADA"}
+
+    def esta_aberto(item: dict[str, Any], campos: tuple[str, ...]) -> bool:
+        status = next((item.get(campo) for campo in campos if item.get(campo) is not None), None)
+        return status is None or str(status).upper() not in status_fechados
+
+    pendencias_abertas = [item for item in pendencias if esta_aberto(item, ("status_pendencia", "status"))]
+    restricoes_abertas = [item for item in restricoes if esta_aberto(item, ("status_restricao", "status"))]
+    obsoletos = [item for item in classificacoes if item.get("eh_obsoleto") is True or str(item.get("eh_obsoleto", "")).lower() in {"true", "t", "1"} or str(item.get("status_revisao", "")).upper() == "OBSOLETO"]
+    sem_revisao = [item for item in classificacoes if not item.get("status_revisao") or str(item.get("status_revisao")).upper() in {"NAO_IDENTIFICADO", "SEM_REVISAO"}]
+    def confianca(item: dict[str, Any]) -> float:
+        try:
+            return float(item.get("confianca_classificacao") or 0)
+        except (TypeError, ValueError):
+            return 0
+
+    baixa_confianca = [item for item in classificacoes if confianca(item) < 0.70]
+
+    nomes_area: dict[str, str] = {}
+    for item in areas:
+        codigo = area_item(item)
+        if codigo and item.get("ativo") is not False:
+            nomes_area[codigo] = str(item.get("nome_area") or item.get("codigo_area") or codigo)
+    for colecao, eh_restricao in ((classificacoes, False), (pendencias_abertas, False), (restricoes_abertas, True)):
+        for item in colecao:
+            codigo = area_item(item, eh_restricao)
+            if codigo:
+                nomes_area.setdefault(codigo, codigo.replace("_", " ").title())
+    if filtro_area:
+        nomes_area = {filtro_area: nomes_area.get(filtro_area, filtro_area.replace("_", " ").title())}
+
+    riscos_todas_areas = []
+    for codigo, nome in sorted(nomes_area.items()):
+        docs_area = [item for item in classificacoes if area_item(item) == codigo]
+        obs_area = sum(item in obsoletos for item in docs_area)
+        pend_area = sum(area_item(item) == codigo for item in pendencias_abertas)
+        rest_area = sum(area_item(item, True) == codigo for item in restricoes_abertas)
+        if obs_area and (pend_area or rest_area):
+            risco = "BLOQUEIO_CRITICO"
+        elif obs_area:
+            risco = "BLOQUEIO_POTENCIAL"
+        elif sum(item in sem_revisao or item in baixa_confianca for item in docs_area) >= 5:
+            risco = "REQUER_VALIDACAO_TECNICA"
+        else:
+            risco = "OPERACIONAL_SEM_ALERTAS"
+        riscos_todas_areas.append({
+            "area": codigo, "nome_area": nome, "status_operacional": risco,
+            "documentos_obsoletos": obs_area, "pendencias_abertas": pend_area,
+            "restricoes_abertas": rest_area,
+        })
+
+    muitos_incertos = len(sem_revisao) + len(baixa_confianca) >= max(5, len(classificacoes) // 5)
+    if any(item["status_operacional"] == "BLOQUEIO_CRITICO" for item in riscos_todas_areas):
+        status_operacional = "BLOQUEIO_CRITICO"
+    elif obsoletos:
+        status_operacional = "BLOQUEIO_POTENCIAL"
+    elif muitos_incertos:
+        status_operacional = "REQUER_VALIDACAO_TECNICA"
+    else:
+        status_operacional = "OPERACIONAL_SEM_ALERTAS"
+
+    alertas: list[str] = []
+    if obsoletos:
+        alertas.append(f"Há {len(obsoletos)} documento(s) obsoleto(s) no recorte consultado.")
+    if pendencias_abertas:
+        alertas.append(f"Há {len(pendencias_abertas)} pendência(s) aberta(s) que requerem verificação.")
+    if restricoes_abertas:
+        alertas.append(f"Há {len(restricoes_abertas)} restrição(ões) aberta(s) que podem afetar o avanço.")
+    if sem_revisao:
+        alertas.append(f"Há {len(sem_revisao)} documento(s) sem revisão identificada.")
+    if baixa_confianca:
+        alertas.append(f"Há {len(baixa_confianca)} classificação(ões) documentais com baixa confiança.")
+    if not alertas and indisponibilidades:
+        alertas.append("O diagnóstico é parcial porque uma ou mais fontes não estavam disponíveis.")
+    alertas = [_texto_curto(item) for item in alertas[:5]]
+
+    recomendacao = (
+        "Validar documentação, pendências e restrições antes de liberar execução em campo. "
+        "Este diagnóstico é consultivo e não confirma liberação definitiva de nenhuma frente."
+    )
+    area_exibicao = nomes_area.get(filtro_area, area) if filtro_area else "todas"
+    linhas = [
+        f"🏗️ Diagnóstico operacional — {obra_codigo}", "", "Filtro:",
+        f"Área: {area_exibicao}", "", "Resumo:",
+        f"- Documentos classificados: {len(classificacoes)}",
+        f"- Documentos obsoletos: {len(obsoletos)}",
+        f"- Sem revisão identificada: {len(sem_revisao)}",
+        f"- Baixa confiança documental: {len(baixa_confianca)}",
+        f"- Pendências abertas: {len(pendencias_abertas)}",
+        f"- Restrições abertas: {len(restricoes_abertas)}", "",
+        "Status operacional:", status_operacional,
+    ]
+    if alertas:
+        linhas.extend(["", "Alertas:", *[f"- {item}" for item in alertas]])
+    linhas.extend(["", "Recomendação:", recomendacao])
+    return {
+        "obra_codigo": obra_codigo, "area": area, "fontes_consultadas": fontes_consultadas,
+        "total_documentos_classificados": len(classificacoes),
+        "total_documentos_obsoletos": len(obsoletos),
+        "total_documentos_sem_revisao": len(sem_revisao),
+        "total_documentos_baixa_confianca": len(baixa_confianca),
+        "total_pendencias_abertas": len(pendencias_abertas),
+        "total_restricoes_abertas": len(restricoes_abertas),
+        "areas_identificadas": [{"area": codigo, "nome_area": nome} for codigo, nome in list(sorted(nomes_area.items()))[:5]],
+        "riscos_por_area": riscos_todas_areas[:5], "alertas": alertas,
+        "fontes_indisponiveis": indisponibilidades, "status_operacional": status_operacional,
+        "recomendacao": recomendacao, "resposta_telegram": "\n".join(linhas),
+        **AGENTE_008_SEGURANCA_CONSULTA,
+    }
+
+
+@app.post("/agentes/gestao-operacional/diagnostico-operacional")
+def diagnostico_operacional(payload: GestaoOperacionalDiagnosticoRequest):
+    try:
+        with get_db_connection() as conn:
+            with conn.cursor() as cur:
+                resultado = _gerar_diagnostico_operacional(
+                    cur, payload.obra_codigo, payload.area, payload.incluir_documentos,
+                    payload.incluir_pendencias, payload.incluir_restricoes,
+                )
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail={
+            "message": "Erro ao gerar diagnóstico operacional consultivo.", "error": str(exc)
+        })
+    return resultado
+
+
 @app.post("/agentes/gestao-operacional/processar-comando")
 def processar_comando_agente_gestao_operacional(
     payload: Optional[ProcessarComandoGestaoOperacionalRequest] = None,
@@ -4301,7 +4552,8 @@ def processar_comando_agente_gestao_operacional(
                           'CONSULTAR_ULTIMA_REVISAO_DOCUMENTAL',
                           'VALIDAR_DOCUMENTO_CAMPO',
                           'GERAR_PLANO_SANEAMENTO_DOCUMENTAL',
-                          'CRIAR_PENDENCIA_DOCUMENTAL'
+                          'CRIAR_PENDENCIA_DOCUMENTAL',
+                          'GERAR_DIAGNOSTICO_OPERACIONAL_OBRA'
                       )
                       AND ce.status = 'PENDENTE'
                       AND (%(id_comando)s::uuid IS NULL OR ce.id_comando = %(id_comando)s::uuid)
@@ -4405,6 +4657,14 @@ def processar_comando_agente_gestao_operacional(
                             comando["obra_codigo"],
                             f"Erro controlado ao criar pendência; a pendência não foi criada: {exc}",
                         )
+                elif comando["tipo_comando"] == "GERAR_DIAGNOSTICO_OPERACIONAL_OBRA":
+                    payload_diagnostico = comando["payload_comando"] or {}
+                    resultado = _gerar_diagnostico_operacional(
+                        cur, comando["obra_codigo"], payload_diagnostico.get("area"),
+                        bool(payload_diagnostico.get("incluir_documentos", True)),
+                        bool(payload_diagnostico.get("incluir_pendencias", True)),
+                        bool(payload_diagnostico.get("incluir_restricoes", True)),
+                    )
                 else:
                     resultado = _resultado_consulta_documentos_classificados(
                         cur, comando["obra_codigo"], comando["payload_comando"]
@@ -4469,7 +4729,7 @@ def processar_comando_agente_gestao_operacional(
     return {
         "ok": True,
         "agente": "AGENTE_008_GESTAO_OPERACIONAL_OBRA",
-        "mvp": "0.6L",
+        "mvp": "0.7A",
         "status_comando": status_resultado,
         "id_comando": str(comando["id_comando"]),
         "tipo_comando": comando["tipo_comando"],
@@ -4678,6 +4938,7 @@ async def receber_entrada_telegram(
         "VALIDAR_DOCUMENTO_CAMPO",
         "GERAR_PLANO_SANEAMENTO_DOCUMENTAL",
         "CRIAR_PENDENCIA_DOCUMENTAL",
+        "GERAR_DIAGNOSTICO_OPERACIONAL_OBRA",
     }
     obra_codigo = payload.obra_codigo or "OBRA-CAIO"
     normalized = {
@@ -5205,6 +5466,15 @@ async def receber_entrada_telegram(
                             "obra_codigo": obra_codigo,
                             **extrair_pendencia_documental_telegram(normalized["conteudo"]),
                             **AGENTE_008_SEGURANCA_REGISTRO_INTERNO,
+                        }
+                    elif classificacao["tipo_comando"] == "GERAR_DIAGNOSTICO_OPERACIONAL_OBRA":
+                        payload_comando = {
+                            "obra_codigo": obra_codigo,
+                            "area": extrair_area_diagnostico_operacional(normalized["conteudo"]),
+                            "incluir_documentos": True,
+                            "incluir_pendencias": True,
+                            "incluir_restricoes": True,
+                            **AGENTE_008_SEGURANCA_CONSULTA,
                         }
 
                 cur.execute(
