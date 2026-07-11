@@ -4555,8 +4555,6 @@ def _gerar_plano_operacional(
 
     filtro_area = normalizar_texto_comparacao(area).replace(" ", "_") if area else None
     atividade_area = {item.get("id"): item.get("codigo_area") for item in atividades}
-    documento_por_id = {item.get("id"): item for item in documentos}
-
     def area_item(item: dict[str, Any], usar_atividade: bool = False) -> Optional[str]:
         valor = item.get("codigo_area") or item.get("area") or item.get("area_detectada")
         if not valor and usar_atividade:
@@ -4586,31 +4584,43 @@ def _gerar_plano_operacional(
     def verdadeiro(valor: Any) -> bool:
         return valor is True or str(valor).lower() in {"true", "t", "1", "sim"}
 
-    def confianca(item: dict[str, Any]) -> float:
+    def baixa_confianca_documental(item: dict[str, Any]) -> bool:
+        valor = item.get("confianca_classificacao")
+        if valor is None:
+            return False
         try:
-            return float(item.get("confianca_classificacao") or 0)
+            return float(valor) < 0.50
         except (TypeError, ValueError):
-            return 0
-
-    def alteracao_recente(item: dict[str, Any]) -> bool:
-        documento = documento_por_id.get(item.get("documento_id"), {})
-        valor = (item.get("atualizado_em") or item.get("updated_at")
-                 or documento.get("ultima_modificacao") or documento.get("atualizado_em"))
-        if isinstance(valor, datetime):
-            agora = datetime.now(valor.tzinfo or timezone.utc)
-            return (agora - valor.replace(tzinfo=valor.tzinfo or timezone.utc)).days <= 30
-        return str(item.get("status", "")).upper() in {"ALTERADO", "ATUALIZADO", "NOVA_REVISAO"}
+            return False
 
     pendencias_abertas = [item for item in pendencias if aberto(item, ("status_pendencia", "status"))]
     restricoes_abertas = [item for item in restricoes if aberto(item, ("status_restricao", "status"))]
     obsoletos = [item for item in classificacoes if verdadeiro(item.get("eh_obsoleto")) or str(item.get("status_revisao", "")).upper() == "OBSOLETO"]
-    alterados = [item for item in classificacoes if alteracao_recente(item)]
+    alterados = [item for item in classificacoes if str(item.get("status_revisao", "")).upper() == "ALTERACAO"]
     risco_alto = [item for item in classificacoes if str(item.get("risco_documental") or item.get("nivel_risco") or "").upper() in {"ALTO", "CRITICO", "CRÍTICO"}]
     sem_revisao = [item for item in classificacoes if not (item.get("numero_revisao") or item.get("status_revisao")) or str(item.get("status_revisao", "")).upper() in {"NAO_IDENTIFICADO", "SEM_REVISAO"}]
     sem_data_revisao = [item for item in classificacoes if not item.get("data_revisao_detectada")]
-    baixa_confianca = [item for item in classificacoes if confianca(item) < 0.70]
+    baixa_confianca = [item for item in classificacoes if baixa_confianca_documental(item)]
     pendencias_criticas = [item for item in pendencias_abertas if str(item.get("criticidade", "")).upper() in {"ALTA", "CRITICA", "CRÍTICA"}]
     pendencias_incompletas = [item for item in pendencias_abertas if not (item.get("prazo") or item.get("data_prazo")) or not (item.get("responsavel") or item.get("responsavel_id"))]
+
+    totais_documentais = {
+        "total_obsoletos": len(obsoletos),
+        "total_alteracao": len(alterados),
+        "total_sem_revisao": len(sem_revisao),
+        "total_baixa_confianca": len(baixa_confianca),
+        "total_sem_data_revisao": len(sem_data_revisao),
+    }
+    try:
+        with cur.connection.transaction():
+            riscos_documentais = _avaliar_riscos_documentais(
+                cur, obra_codigo, area, None, min(limite_acoes, 50)
+            )
+        totais_documentais.update(riscos_documentais["totais"])
+    except Exception as exc:
+        fontes_indisponiveis.append(
+            f"riscos_documentais: {_texto_curto(exc, 90)}"
+        )
 
     candidatas: dict[str, list[dict[str, Any]]] = {f"PRIORIDADE_{n}": [] for n in range(1, 4)}
 
@@ -4621,14 +4631,20 @@ def _gerar_plano_operacional(
                 "area": area, "acao": _texto_curto(acao, 150),
             })
 
-    adicionar("PRIORIDADE_1", "DOCUMENTO_OBSOLETO", len(obsoletos), f"Segregar e validar tecnicamente {len(obsoletos)} documento(s) obsoleto(s) antes do uso em campo.")
-    adicionar("PRIORIDADE_1", "ALTERACAO_DOCUMENTAL_RECENTE", len(alterados), f"Revisar o impacto de {len(alterados)} alteração(ões) documental(is) recente(s) com a equipe técnica.")
+    total_obsoletos = totais_documentais["total_obsoletos"]
+    total_alteracao = totais_documentais["total_alteracao"]
+    total_sem_revisao = totais_documentais["total_sem_revisao"]
+    total_baixa_confianca = totais_documentais["total_baixa_confianca"]
+    total_sem_data_revisao = totais_documentais["total_sem_data_revisao"]
+
+    adicionar("PRIORIDADE_1", "DOCUMENTO_OBSOLETO", total_obsoletos, f"Segregar e validar tecnicamente {total_obsoletos} documento(s) obsoleto(s) antes do uso em campo.")
+    adicionar("PRIORIDADE_1", "ALTERACAO_DOCUMENTAL_RECENTE", total_alteracao, f"Revisar o impacto de {total_alteracao} alteração(ões) documental(is) recente(s) com a equipe técnica.")
     adicionar("PRIORIDADE_1", "RESTRICAO_ABERTA", len(restricoes_abertas), f"Tratar {len(restricoes_abertas)} restrição(ões) aberta(s) e registrar responsável e evidência de resolução.")
     adicionar("PRIORIDADE_1", "PENDENCIA_CRITICA", len(pendencias_criticas), f"Priorizar {len(pendencias_criticas)} pendência(s) crítica(s) aberta(s) para validação técnica.")
     adicionar("PRIORIDADE_1", "RISCO_DOCUMENTAL_ALTO", len(risco_alto), f"Avaliar {len(risco_alto)} documento(s) com risco alto ou crítico antes de orientar a frente.")
-    adicionar("PRIORIDADE_2", "REVISAO_NAO_IDENTIFICADA", len(sem_revisao), f"Identificar a revisão de {len(sem_revisao)} documento(s) e confirmar a versão aplicável.")
-    adicionar("PRIORIDADE_2", "DATA_REVISAO_AUSENTE", len(sem_data_revisao), f"Complementar a data de revisão de {len(sem_data_revisao)} documento(s).")
-    adicionar("PRIORIDADE_2", "BAIXA_CONFIANCA_DOCUMENTAL", len(baixa_confianca), f"Validar manualmente {len(baixa_confianca)} classificação(ões) documental(is) de baixa confiança.")
+    adicionar("PRIORIDADE_2", "REVISAO_NAO_IDENTIFICADA", total_sem_revisao, f"Identificar a revisão de {total_sem_revisao} documento(s) e confirmar a versão aplicável.")
+    adicionar("PRIORIDADE_2", "DATA_REVISAO_AUSENTE", total_sem_data_revisao, f"Complementar a data de revisão de {total_sem_data_revisao} documento(s).")
+    adicionar("PRIORIDADE_2", "BAIXA_CONFIANCA_DOCUMENTAL", total_baixa_confianca, f"Validar manualmente {total_baixa_confianca} classificação(ões) documental(is) de baixa confiança.")
     adicionar("PRIORIDADE_2", "PENDENCIA_INCOMPLETA", len(pendencias_incompletas), f"Definir prazo e responsável nas {len(pendencias_incompletas)} pendência(s) incompleta(s).")
     adicionar("PRIORIDADE_3", "REVISAR_CLASSIFICACAO", len(classificacoes), "Revisar a classificação documental do recorte e corrigir inconsistências.")
     adicionar("PRIORIDADE_3", "ORGANIZAR_DOCUMENTACAO", len(documentos), "Organizar a documentação por área e disciplina para facilitar a consulta técnica.")
