@@ -29,7 +29,12 @@ DEFAULT_API_CORE_URL = "http://api_core:8000/telegram/entrada"
 DEFAULT_PROCESSAR_URL = (
     "http://api_core:8000/agentes/gestao-operacional/processar-comando"
 )
+DEFAULT_BRIEFING_URL = (
+    "http://api_core:8000/agentes/gestao-operacional/briefing-diario-agendado"
+)
+DEFAULT_BRIEFING_CONFIRM_URL = f"{DEFAULT_BRIEFING_URL}/confirmar-envio"
 DEFAULT_INTERVAL_SECONDS = 5.0
+BRIEFING_CHECK_INTERVAL_SECONDS = 60.0
 
 
 def log_json(evento: str, **campos: Any) -> None:
@@ -157,6 +162,86 @@ def processar_e_responder(token: str, processar_url: str) -> dict[str, Any]:
     }
 
 
+def confirmar_briefing(
+    confirmar_url: str,
+    envio_id: int,
+    status: str,
+    telegram_message_id: str | None = None,
+    mensagem_erro: str | None = None,
+) -> dict[str, Any]:
+    status_code, body = post_json(
+        confirmar_url,
+        {
+            "envio_id": envio_id,
+            "telegram_message_id": telegram_message_id,
+            "status": status,
+            "mensagem_erro": mensagem_erro,
+        },
+    )
+    if not 200 <= status_code < 300:
+        raise RuntimeError(f"Confirmação do briefing falhou com HTTP {status_code}.")
+    return body
+
+
+def processar_briefing_agendado(
+    token: str,
+    briefing_url: str,
+    confirmar_url: str,
+) -> dict[str, Any]:
+    status_code, body = post_json(briefing_url, {"forcar": False})
+    if not 200 <= status_code < 300:
+        raise RuntimeError(f"Agendamento do briefing falhou com HTTP {status_code}.")
+
+    status = str(body.get("status") or "ERRO")
+    eventos_sem_envio = {
+        "DESABILITADO": "briefing_agendado_desabilitado",
+        "FORA_DO_HORARIO": "briefing_agendado_fora_do_horario",
+        "JA_ENVIADO": "briefing_agendado_ja_enviado",
+    }
+    if status in eventos_sem_envio:
+        log_json(eventos_sem_envio[status], status=status, envio_id=body.get("envio_id"))
+        return {"status": status, "envio_id": body.get("envio_id")}
+
+    envio_id = body.get("envio_id")
+    chat_id = body.get("chat_id")
+    resposta = body.get("resposta_telegram")
+    if not body.get("deve_enviar_telegram") or not envio_id or not chat_id or not resposta:
+        if status not in {"CHAT_EXECUTIVO_NAO_CONFIGURADO", "CONFIGURACAO_INVALIDA"}:
+            return {"status": status}
+        log_json("briefing_agendado_erro", status=status, envio_id=envio_id)
+        return {"status": status}
+
+    chat_executivo = (os.getenv("TELEGRAM_EXECUTIVE_CHAT_ID") or "").strip()
+    if not chat_executivo or str(chat_id) != chat_executivo:
+        erro = "chat_id do agendamento não corresponde ao executivo autorizado."
+        confirmar_briefing(confirmar_url, int(envio_id), "ERRO", mensagem_erro=erro)
+        log_json("briefing_agendado_erro", envio_id=envio_id, erro=erro)
+        return {"status": "ERRO", "envio_id": envio_id}
+
+    try:
+        envio = enviar_mensagem_telegram(token, str(chat_id), str(resposta))
+        message_id = envio.get("message_id")
+        if message_id is None:
+            raise RuntimeError("Telegram não retornou message_id.")
+        confirmar_briefing(
+            confirmar_url, int(envio_id), "CONCLUIDO", telegram_message_id=str(message_id)
+        )
+        log_json(
+            "briefing_agendado_enviado",
+            envio_id=envio_id,
+            telegram_message_id=str(message_id),
+        )
+        return {"status": "CONCLUIDO", "envio_id": envio_id}
+    except Exception as exc:
+        erro = f"{type(exc).__name__}: {exc}"
+        try:
+            confirmar_briefing(confirmar_url, int(envio_id), "ERRO", mensagem_erro=erro)
+        except Exception as confirm_exc:
+            erro = f"{erro}; confirmação: {type(confirm_exc).__name__}: {confirm_exc}"
+        log_json("briefing_agendado_erro", envio_id=envio_id, erro=erro)
+        return {"status": "ERRO", "envio_id": envio_id}
+
+
 def main() -> int:
     token = os.getenv("TELEGRAM_BOT_TOKEN")
     if not token:
@@ -167,8 +252,14 @@ def main() -> int:
     processar_url = (
         os.getenv("TELEGRAM_GESTAO_PROCESSAR_URL") or DEFAULT_PROCESSAR_URL
     )
+    briefing_url = os.getenv("TELEGRAM_DAILY_BRIEFING_URL") or DEFAULT_BRIEFING_URL
+    confirmar_briefing_url = (
+        os.getenv("TELEGRAM_DAILY_BRIEFING_CONFIRM_URL")
+        or DEFAULT_BRIEFING_CONFIRM_URL
+    )
     intervalo = carregar_intervalo()
     ciclo = 0
+    proxima_verificacao_briefing = 0.0
     log_json(
         "telegram_worker_iniciado",
         api_core_url=api_core_url,
@@ -181,6 +272,7 @@ def main() -> int:
         inicio = time.monotonic()
         resultado_captura: dict[str, Any]
         resultado_processamento: dict[str, Any]
+        resultado_briefing: dict[str, Any] = {"status": "NAO_VERIFICADO_NESTE_CICLO"}
 
         try:
             resultado_captura = capturar_e_encaminhar(token, api_core_url)
@@ -190,6 +282,21 @@ def main() -> int:
                 "erro_tipo": type(exc).__name__,
                 "erro": str(exc),
             }
+
+        agora_monotonic = time.monotonic()
+        if agora_monotonic >= proxima_verificacao_briefing:
+            proxima_verificacao_briefing = agora_monotonic + BRIEFING_CHECK_INTERVAL_SECONDS
+            try:
+                resultado_briefing = processar_briefing_agendado(
+                    token, briefing_url, confirmar_briefing_url
+                )
+            except Exception as exc:
+                resultado_briefing = {
+                    "status": "ERRO",
+                    "erro_tipo": type(exc).__name__,
+                    "erro": str(exc),
+                }
+                log_json("briefing_agendado_erro", **resultado_briefing)
 
         try:
             resultado_processamento = processar_e_responder(token, processar_url)
@@ -207,6 +314,7 @@ def main() -> int:
             duracao_segundos=duracao,
             captura=resultado_captura,
             processamento=resultado_processamento,
+            briefing_agendado=resultado_briefing,
         )
         time.sleep(intervalo)
 

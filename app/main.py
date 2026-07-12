@@ -11,6 +11,7 @@ from io import BytesIO
 from pathlib import Path
 from urllib.parse import urlparse
 from typing import Any, Dict, Optional
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import psycopg
 from minio import Minio
@@ -290,6 +291,17 @@ class GestaoOperacionalBriefingDiarioRequest(BaseModel):
     incluir_acoes: bool = True
     incluir_documentos: bool = True
     incluir_historico: bool = True
+
+
+class GestaoOperacionalBriefingDiarioAgendadoRequest(BaseModel):
+    forcar: bool = False
+
+
+class GestaoOperacionalConfirmarBriefingDiarioRequest(BaseModel):
+    envio_id: int = Field(gt=0)
+    telegram_message_id: str | None = None
+    status: str = Field(default="CONCLUIDO", pattern="^(CONCLUIDO|ERRO)$")
+    mensagem_erro: str | None = None
 
 
 class GestaoOperacionalCriarAcaoRequest(BaseModel):
@@ -5175,6 +5187,161 @@ def briefing_diario(payload: GestaoOperacionalBriefingDiarioRequest):
                 return _gerar_briefing_diario(cur, payload.obra_codigo, payload.area, payload.limite_itens, payload.incluir_acoes, payload.incluir_documentos, payload.incluir_historico)
     except Exception as exc:
         raise HTTPException(status_code=500, detail={"message": "Erro ao gerar briefing diário executivo consultivo.", "error": str(exc)})
+
+
+def _resposta_briefing_agendado(status: str, **campos: Any) -> dict[str, Any]:
+    return serializar_json_seguro({
+        "ok": status not in {"ERRO"},
+        "status": status,
+        "deve_enviar_telegram": False,
+        "chat_id": None,
+        "resposta_telegram": None,
+        "envio_id": None,
+        **campos,
+        **AGENTE_008_SEGURANCA_CONSULTA,
+    })
+
+
+def _configuracao_briefing_diario() -> dict[str, Any]:
+    enabled = os.getenv("TELEGRAM_DAILY_BRIEFING_ENABLED", "false").strip().lower() == "true"
+    if not enabled:
+        return {"enabled": False}
+    timezone_name = os.getenv("TELEGRAM_DAILY_BRIEFING_TIMEZONE", "America/Sao_Paulo").strip()
+    horario_texto = os.getenv("TELEGRAM_DAILY_BRIEFING_TIME", "07:30").strip()
+    try:
+        fuso = ZoneInfo(timezone_name)
+    except ZoneInfoNotFoundError as exc:
+        raise ValueError(f"Timezone inválido: {timezone_name}") from exc
+    try:
+        horario = datetime.strptime(horario_texto, "%H:%M").time()
+    except ValueError as exc:
+        raise ValueError("TELEGRAM_DAILY_BRIEFING_TIME deve usar o formato HH:MM.") from exc
+    try:
+        limite = max(1, min(int(os.getenv("TELEGRAM_DAILY_BRIEFING_LIMITE_ITENS", "10")), 50))
+    except ValueError as exc:
+        raise ValueError("TELEGRAM_DAILY_BRIEFING_LIMITE_ITENS deve ser inteiro.") from exc
+    return {
+        "enabled": enabled,
+        "agora_local": datetime.now(fuso),
+        "horario": horario,
+        "obra_codigo": os.getenv("TELEGRAM_DAILY_BRIEFING_OBRA_CODIGO", "OBRA-CAIO").strip(),
+        "area": os.getenv("TELEGRAM_DAILY_BRIEFING_AREA", "").strip() or None,
+        "limite_itens": limite,
+        "chat_id": (TELEGRAM_EXECUTIVE_CHAT_ID or "").strip() or None,
+    }
+
+
+@app.post("/agentes/gestao-operacional/briefing-diario-agendado")
+def briefing_diario_agendado(
+    payload: GestaoOperacionalBriefingDiarioAgendadoRequest | None = None,
+):
+    try:
+        config = _configuracao_briefing_diario()
+        if not config["enabled"]:
+            return _resposta_briefing_agendado("DESABILITADO")
+        if not config["chat_id"]:
+            return _resposta_briefing_agendado("CHAT_EXECUTIVO_NAO_CONFIGURADO")
+        if not config["obra_codigo"]:
+            return _resposta_briefing_agendado("CONFIGURACAO_INVALIDA")
+        agora_local = config["agora_local"]
+        forcar = payload.forcar if payload else False
+        if agora_local.time().replace(tzinfo=None) < config["horario"] and not forcar:
+            return _resposta_briefing_agendado("FORA_DO_HORARIO")
+
+        with get_db_connection() as conn:
+            with conn.transaction():
+                with conn.cursor() as cur:
+                    cur.execute(
+                        """
+                        SELECT id, status, resposta_telegram
+                        FROM envios_briefing_diario_obra
+                        WHERE obra_codigo = %s AND COALESCE(area, '') = COALESCE(%s, '')
+                          AND data_briefing = %s
+                          AND tipo_briefing = 'BRIEFING_EXECUTIVO_DIARIO'
+                          AND canal = 'TELEGRAM'
+                        FOR UPDATE
+                        """,
+                        (config["obra_codigo"], config["area"], agora_local.date()),
+                    )
+                    existente = cur.fetchone()
+                    if existente and existente[1] == "CONCLUIDO" and not forcar:
+                        return _resposta_briefing_agendado("JA_ENVIADO", envio_id=existente[0])
+
+                    briefing = _gerar_briefing_diario(
+                        cur, config["obra_codigo"], config["area"], config["limite_itens"],
+                        True, True, True,
+                    )
+                    briefing["data_briefing"] = agora_local.date().isoformat()
+                    briefing = serializar_json_seguro(briefing)
+                    resposta = briefing.get("resposta_telegram")
+                    cur.execute(
+                        """
+                        INSERT INTO envios_briefing_diario_obra (
+                            obra_codigo, area, data_briefing, chat_id, status,
+                            payload_briefing, resposta_telegram, mensagem_erro, atualizado_em
+                        ) VALUES (%s, %s, %s, %s, 'PENDENTE', %s, %s, NULL, now())
+                        ON CONFLICT (
+                            obra_codigo, (COALESCE(area, '')), data_briefing, tipo_briefing, canal
+                        ) DO UPDATE SET
+                            chat_id = EXCLUDED.chat_id,
+                            status = 'PENDENTE',
+                            payload_briefing = EXCLUDED.payload_briefing,
+                            resposta_telegram = EXCLUDED.resposta_telegram,
+                            mensagem_erro = NULL,
+                            atualizado_em = now()
+                        RETURNING id
+                        """,
+                        (
+                            config["obra_codigo"], config["area"], agora_local.date(),
+                            config["chat_id"], Json(briefing), resposta,
+                        ),
+                    )
+                    envio_id = cur.fetchone()[0]
+        return _resposta_briefing_agendado(
+            "PENDENTE", deve_enviar_telegram=True, chat_id=config["chat_id"],
+            resposta_telegram=resposta, envio_id=envio_id,
+        )
+    except ValueError as exc:
+        return _resposta_briefing_agendado("CONFIGURACAO_INVALIDA", mensagem_erro=str(exc))
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail={
+            "message": "Erro ao agendar briefing diário executivo consultivo.", "error": str(exc),
+        })
+
+
+@app.post("/agentes/gestao-operacional/briefing-diario-agendado/confirmar-envio")
+def confirmar_envio_briefing_diario(payload: GestaoOperacionalConfirmarBriefingDiarioRequest):
+    if payload.status == "CONCLUIDO" and not payload.telegram_message_id:
+        raise HTTPException(status_code=422, detail="telegram_message_id é obrigatório para CONCLUIDO.")
+    try:
+        with get_db_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE envios_briefing_diario_obra
+                    SET status = %s,
+                        telegram_message_id = CASE WHEN %s = 'CONCLUIDO' THEN %s ELSE telegram_message_id END,
+                        mensagem_erro = CASE WHEN %s = 'ERRO' THEN %s ELSE NULL END,
+                        enviado_em = CASE WHEN %s = 'CONCLUIDO' THEN now() ELSE enviado_em END,
+                        atualizado_em = now()
+                    WHERE id = %s
+                    RETURNING id
+                    """,
+                    (
+                        payload.status, payload.status, payload.telegram_message_id,
+                        payload.status, payload.mensagem_erro, payload.status, payload.envio_id,
+                    ),
+                )
+                atualizado = cur.fetchone()
+        if not atualizado:
+            raise HTTPException(status_code=404, detail="Envio de briefing não encontrado.")
+        return _resposta_briefing_agendado(payload.status, envio_id=atualizado[0])
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail={
+            "message": "Erro ao confirmar envio do briefing diário.", "error": str(exc),
+        })
 
 
 @app.post("/agentes/gestao-operacional/diagnostico-operacional")
