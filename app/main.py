@@ -277,6 +277,12 @@ class GestaoOperacionalPlanoOperacionalRequest(BaseModel):
     limite_acoes: int = Field(default=10, ge=1, le=10)
 
 
+class GestaoOperacionalResumoExecutivoRequest(BaseModel):
+    obra_codigo: str
+    area: str | None = None
+    limite_itens: int = Field(default=10, ge=1, le=50)
+
+
 class GestaoOperacionalCriarAcaoRequest(BaseModel):
     obra_codigo: str
     area: str | None = None
@@ -485,6 +491,22 @@ def classificar_intencao_executiva(conteudo: Optional[str]) -> dict[str, Any]:
         "listar acoes operacionais abertas", "acoes pendentes da obra",
         "acoes pendentes do refeitorio", "status das acoes operacionais",
     }
+    comandos_resumo_executivo = {
+        "resumo operacional da obra", "resumo executivo da obra",
+        "resumo executivo operacional", "resumo das acoes operacionais",
+        "o que esta pendente na obra", "status executivo da obra",
+        "panorama operacional da obra", "resumo operacional do refeitorio",
+        "status executivo do refeitorio",
+    }
+    if texto_comando_normalizado in comandos_resumo_executivo:
+        return {
+            "intencao": "GERAR_RESUMO_EXECUTIVO_OPERACIONAL_OBRA",
+            "agente_destino": "AGENTE_008_GESTAO_OPERACIONAL_OBRA",
+            "tipo_comando": "GERAR_RESUMO_EXECUTIVO_OPERACIONAL_OBRA",
+            "requer_aprovacao": False,
+            "confianca": 0.99,
+            "justificativa": "Resumo executivo consultivo, sem alteração ou execução externa.",
+        }
     if texto_comando_normalizado in comandos_listar_acoes:
         return {
             "intencao": "LISTAR_ACOES_OPERACIONAIS_OBRA",
@@ -4786,6 +4808,164 @@ def _gerar_plano_operacional(
     }
 
 
+def _gerar_resumo_executivo_operacional(
+    cur, obra_codigo: str, area: Optional[str], limite_itens: int,
+) -> dict[str, Any]:
+    fontes_indisponiveis: list[str] = []
+
+    def ler(tabela: str, colunas: list[str]) -> list[dict[str, Any]]:
+        linhas, erro = _linhas_fonte_operacional(cur, tabela, colunas, obra_codigo)
+        if erro:
+            fontes_indisponiveis.append(f"{tabela}: {_texto_curto(erro, 90)}")
+        return linhas
+
+    classificacoes = ler("classificacoes_documentais_obra", [
+        "area_detectada", "codigo_area", "area", "status_revisao", "numero_revisao",
+        "eh_obsoleto", "confianca_classificacao", "status",
+    ])
+    documentos = ler("documentos_minio_obra", ["id", "area", "codigo_area", "nome_arquivo"])
+    acoes = ler("acoes_operacionais_obra", [
+        "area", "codigo_area", "status", "prioridade", "titulo", "descricao", "prazo",
+    ])
+    pendencias = ler("pendencias_obra", [
+        "area", "codigo_area", "area_detectada", "status", "status_pendencia",
+        "titulo", "descricao", "criticidade",
+    ])
+    restricoes = ler("restricoes_atividade", [
+        "atividade_id", "area", "codigo_area", "status", "status_restricao",
+        "descricao", "criticidade",
+    ])
+    areas = ler("areas_obra", ["codigo_area", "nome_area", "ativo"])
+    atividades = ler("atividades_cronograma", ["id", "codigo_area", "area", "descricao"])
+
+    filtro_area = normalizar_texto_comparacao(area).replace(" ", "_") if area else None
+    atividade_area = {item.get("id"): item.get("codigo_area") or item.get("area") for item in atividades}
+
+    def area_item(item: dict[str, Any], usar_atividade: bool = False) -> Optional[str]:
+        valor = item.get("codigo_area") or item.get("area") or item.get("area_detectada")
+        if not valor and usar_atividade:
+            valor = atividade_area.get(item.get("atividade_id"))
+        return normalizar_texto_comparacao(str(valor)).replace(" ", "_") if valor else None
+
+    if filtro_area:
+        classificacoes = [item for item in classificacoes if area_item(item) == filtro_area]
+        documentos = [item for item in documentos if area_item(item) == filtro_area]
+        acoes = [item for item in acoes if area_item(item) == filtro_area]
+        pendencias = [item for item in pendencias if area_item(item) == filtro_area]
+        restricoes = [item for item in restricoes if area_item(item, True) == filtro_area]
+
+    status_fechados = {
+        "CONCLUIDO", "CONCLUIDA", "RESOLVIDO", "RESOLVIDA", "FECHADO", "FECHADA",
+        "ENCERRADO", "ENCERRADA", "CANCELADO", "CANCELADA", "LIBERADO", "LIBERADA",
+    }
+
+    def aberto(item: dict[str, Any], campos: tuple[str, ...]) -> bool:
+        status = next((item.get(campo) for campo in campos if item.get(campo) is not None), None)
+        return status is None or str(status).upper() not in status_fechados
+
+    def verdadeiro(valor: Any) -> bool:
+        return valor is True or str(valor).lower() in {"true", "t", "1", "sim"}
+
+    def baixa_confianca(item: dict[str, Any]) -> bool:
+        valor = item.get("confianca_classificacao")
+        if valor is None:
+            return False
+        try:
+            return float(valor) < 0.70
+        except (TypeError, ValueError):
+            return False
+
+    obsoletos = [item for item in classificacoes if verdadeiro(item.get("eh_obsoleto")) or str(item.get("status_revisao", "")).upper() == "OBSOLETO"]
+    sem_revisao = [item for item in classificacoes if not (item.get("numero_revisao") or item.get("status_revisao")) or str(item.get("status_revisao", "")).upper() in {"NAO_IDENTIFICADO", "SEM_REVISAO"}]
+    baixa_confianca_itens = [item for item in classificacoes if baixa_confianca(item)]
+    acoes_abertas = [item for item in acoes if str(item.get("status", "")).upper() == "ABERTA"]
+    acoes_andamento = [item for item in acoes if str(item.get("status", "")).upper() == "EM_ANDAMENTO"]
+    acoes_concluidas = [item for item in acoes if str(item.get("status", "")).upper() == "CONCLUIDA"]
+    acoes_canceladas = [item for item in acoes if str(item.get("status", "")).upper() == "CANCELADA"]
+    acoes_nao_encerradas = acoes_abertas + acoes_andamento
+    criticas = [item for item in acoes_nao_encerradas if str(item.get("prioridade", "")).upper() == "CRITICA"]
+    altas = [item for item in acoes_nao_encerradas if str(item.get("prioridade", "")).upper() == "ALTA"]
+    pendencias_abertas = [item for item in pendencias if aberto(item, ("status_pendencia", "status"))]
+    restricoes_abertas = [item for item in restricoes if aberto(item, ("status_restricao", "status"))]
+
+    muitos_incertos = (
+        len(sem_revisao) + len(baixa_confianca_itens)
+        >= max(5, (len(classificacoes) + 4) // 5)
+    )
+    if obsoletos or criticas or altas:
+        status_executivo = "BLOQUEIO_POTENCIAL"
+    elif muitos_incertos:
+        status_executivo = "REQUER_VALIDACAO_TECNICA"
+    elif acoes_nao_encerradas or pendencias_abertas or restricoes_abertas:
+        status_executivo = "REQUER_ATENCAO"
+    else:
+        status_executivo = "SEM_ALERTAS_RELEVANTES"
+
+    alertas: list[str] = []
+    proximos_passos: list[str] = []
+
+    def registrar(condicao: bool, alerta: str, passo: str) -> None:
+        if condicao:
+            alertas.append(_texto_curto(alerta))
+            proximos_passos.append(_texto_curto(passo))
+
+    registrar(bool(obsoletos), f"Há {len(obsoletos)} documento(s) obsoleto(s) no recorte.", "Validar tecnicamente e segregar documentos obsoletos antes do uso em campo.")
+    registrar(bool(criticas or altas), f"Há {len(criticas)} ação(ões) crítica(s) e {len(altas)} alta(s) não encerrada(s).", "Priorizar ações críticas e altas, confirmando responsáveis e prazos.")
+    registrar(bool(sem_revisao), f"Há {len(sem_revisao)} documento(s) sem revisão identificada.", "Confirmar as revisões documentais aplicáveis com a equipe técnica.")
+    registrar(bool(baixa_confianca_itens), f"Há {len(baixa_confianca_itens)} classificação(ões) com baixa confiança.", "Revisar manualmente as classificações documentais de baixa confiança.")
+    registrar(bool(pendencias_abertas or restricoes_abertas), f"Há {len(pendencias_abertas)} pendência(s) e {len(restricoes_abertas)} restrição(ões) aberta(s).", "Verificar pendências e restrições, registrando tratamento e evidências.")
+    if fontes_indisponiveis and len(alertas) < 5:
+        alertas.append("O resumo é parcial porque uma ou mais fontes não estavam disponíveis.")
+    if not proximos_passos:
+        proximos_passos.append("Manter acompanhamento consultivo; qualquer liberação exige validação técnica responsável.")
+    alertas = alertas[:min(limite_itens, 5)]
+    proximos_passos = proximos_passos[:min(limite_itens, 5)]
+
+    nomes_area = {
+        area_item(item): str(item.get("nome_area") or item.get("codigo_area"))
+        for item in areas if area_item(item) and item.get("ativo") is not False
+    }
+    area_exibicao = nomes_area.get(filtro_area, area) if filtro_area else "todas"
+    linhas = [
+        f"📊 Resumo executivo operacional — {obra_codigo}", "", "Filtro:",
+        f"Área: {area_exibicao}", "", "Documentação:",
+        f"- Classificados: {len(classificacoes)}", f"- Obsoletos: {len(obsoletos)}",
+        f"- Sem revisão: {len(sem_revisao)}", f"- Baixa confiança: {len(baixa_confianca_itens)}",
+        "", "Ações operacionais:", f"- Abertas: {len(acoes_abertas)}",
+        f"- Em andamento: {len(acoes_andamento)}", f"- Concluídas: {len(acoes_concluidas)}",
+        f"- Críticas/altas: {len(criticas) + len(altas)}", "", "Status executivo:",
+        status_executivo, "", "Alertas:",
+        *([f"- {item}" for item in alertas] or ["- Nenhum alerta relevante identificado nas fontes disponíveis."]),
+        "", "Próximos passos:", *[f"- {item}" for item in proximos_passos], "",
+        "Modo: CONSULTA", "Nenhum cronograma, RDO, MinIO ou OpenProject foi alterado.",
+        "Este resumo não confirma liberação definitiva da obra ou de qualquer frente.",
+    ]
+    return {
+        "obra_codigo": obra_codigo, "area": area,
+        "totais_documentais": {
+            "documentos_classificados": len(classificacoes), "documentos_obsoletos": len(obsoletos),
+            "documentos_sem_revisao": len(sem_revisao), "documentos_baixa_confianca": len(baixa_confianca_itens),
+        },
+        "totais_acoes_operacionais": {
+            "abertas": len(acoes_abertas), "em_andamento": len(acoes_andamento),
+            "concluidas": len(acoes_concluidas), "canceladas": len(acoes_canceladas),
+            "criticas": len(criticas), "altas": len(altas),
+        },
+        "pendencias_abertas": len(pendencias_abertas), "restricoes_abertas": len(restricoes_abertas),
+        "status_executivo": status_executivo, "principais_alertas": alertas,
+        "proximos_passos_recomendados": proximos_passos,
+        "resposta_telegram": "\n".join(linhas),
+        "fontes_indisponiveis": fontes_indisponiveis,
+        "documentos_catalogados": len(documentos),
+        "flags": {
+            "modo": "CONSULTA", "altera_cronograma": False, "executa_rpa": False,
+            "sincroniza_openproject": False, "altera_rdo_oficial": False,
+            "envia_terceiros": False,
+        },
+        **AGENTE_008_SEGURANCA_CONSULTA,
+    }
+
+
 @app.post("/agentes/gestao-operacional/diagnostico-operacional")
 def diagnostico_operacional(payload: GestaoOperacionalDiagnosticoRequest):
     try:
@@ -4813,6 +4993,20 @@ def plano_operacional(payload: GestaoOperacionalPlanoOperacionalRequest):
     except Exception as exc:
         raise HTTPException(status_code=500, detail={
             "message": "Erro ao gerar plano operacional consultivo.", "error": str(exc),
+        })
+
+
+@app.post("/agentes/gestao-operacional/resumo-executivo-operacional")
+def resumo_executivo_operacional(payload: GestaoOperacionalResumoExecutivoRequest):
+    try:
+        with get_db_connection() as conn:
+            with conn.cursor() as cur:
+                return _gerar_resumo_executivo_operacional(
+                    cur, payload.obra_codigo, payload.area, payload.limite_itens,
+                )
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail={
+            "message": "Erro ao gerar resumo executivo operacional consultivo.", "error": str(exc),
         })
 
 
@@ -5022,6 +5216,7 @@ def processar_comando_agente_gestao_operacional(
                           'CRIAR_PENDENCIA_DOCUMENTAL',
                           'GERAR_DIAGNOSTICO_OPERACIONAL_OBRA',
                           'GERAR_PLANO_OPERACIONAL_OBRA',
+                          'GERAR_RESUMO_EXECUTIVO_OPERACIONAL_OBRA',
                           'CRIAR_ACAO_OPERACIONAL_OBRA',
                           'LISTAR_ACOES_OPERACIONAIS_OBRA',
                           'ATUALIZAR_ACAO_OPERACIONAL_OBRA'
@@ -5040,7 +5235,7 @@ def processar_comando_agente_gestao_operacional(
                     return {
                         "ok": True,
                         "agente": "AGENTE_008_GESTAO_OPERACIONAL_OBRA",
-                        "mvp": "0.7C",
+                        "mvp": "0.7D",
                         "status": "SEM_COMANDO_PENDENTE",
                         "message": (
                             "Nenhum comando PENDENTE para "
@@ -5150,6 +5345,20 @@ def processar_comando_agente_gestao_operacional(
                             "resposta_telegram": "Não foi possível gerar o plano operacional consultivo.",
                             **AGENTE_008_SEGURANCA_CONSULTA,
                         }
+                elif comando["tipo_comando"] == "GERAR_RESUMO_EXECUTIVO_OPERACIONAL_OBRA":
+                    payload_resumo = comando["payload_comando"] or {}
+                    try:
+                        resultado = _gerar_resumo_executivo_operacional(
+                            cur, comando["obra_codigo"], payload_resumo.get("area"),
+                            max(1, min(int(payload_resumo.get("limite_itens", 10)), 50)),
+                        )
+                    except Exception as exc:
+                        resultado = {
+                            "ok": False,
+                            "erro_controlado": f"Resumo executivo não gerado: {_texto_curto(exc)}",
+                            "resposta_telegram": "Não foi possível gerar o resumo executivo operacional consultivo.",
+                            **AGENTE_008_SEGURANCA_CONSULTA,
+                        }
                 elif comando["tipo_comando"] == "CRIAR_ACAO_OPERACIONAL_OBRA":
                     dados_acao = {
                         **(comando["payload_comando"] or {}),
@@ -5185,6 +5394,7 @@ def processar_comando_agente_gestao_operacional(
                         "CRIAR_PENDENCIA_DOCUMENTAL",
                         "GERAR_PLANO_SANEAMENTO_DOCUMENTAL",
                         "GERAR_PLANO_OPERACIONAL_OBRA",
+                        "GERAR_RESUMO_EXECUTIVO_OPERACIONAL_OBRA",
                     }
                     and resultado.get("ok") is False
                     else "CONCLUIDO"
@@ -5240,7 +5450,7 @@ def processar_comando_agente_gestao_operacional(
     return {
         "ok": True,
         "agente": "AGENTE_008_GESTAO_OPERACIONAL_OBRA",
-        "mvp": "0.7C",
+        "mvp": "0.7D",
         "status_comando": status_resultado,
         "id_comando": str(comando["id_comando"]),
         "tipo_comando": comando["tipo_comando"],
@@ -5451,6 +5661,7 @@ async def receber_entrada_telegram(
         "CRIAR_PENDENCIA_DOCUMENTAL",
         "GERAR_DIAGNOSTICO_OPERACIONAL_OBRA",
         "GERAR_PLANO_OPERACIONAL_OBRA",
+        "GERAR_RESUMO_EXECUTIVO_OPERACIONAL_OBRA",
         "CRIAR_ACAO_OPERACIONAL_OBRA",
         "LISTAR_ACOES_OPERACIONAIS_OBRA",
         "ATUALIZAR_ACAO_OPERACIONAL_OBRA",
@@ -5996,6 +6207,13 @@ async def receber_entrada_telegram(
                             "obra_codigo": obra_codigo,
                             "area": extrair_area_plano_operacional(normalized["conteudo"]),
                             "limite_acoes": 10,
+                            **AGENTE_008_SEGURANCA_CONSULTA,
+                        }
+                    elif classificacao["tipo_comando"] == "GERAR_RESUMO_EXECUTIVO_OPERACIONAL_OBRA":
+                        payload_comando = {
+                            "obra_codigo": obra_codigo,
+                            "area": extrair_area_diagnostico_operacional(normalized["conteudo"]),
+                            "limite_itens": 10,
                             **AGENTE_008_SEGURANCA_CONSULTA,
                         }
                     elif classificacao["tipo_comando"] == "CRIAR_ACAO_OPERACIONAL_OBRA":
