@@ -6,6 +6,7 @@ import os
 import uuid
 import unicodedata
 from datetime import date, datetime, timezone
+from decimal import Decimal
 from io import BytesIO
 from pathlib import Path
 from urllib.parse import urlparse
@@ -4815,6 +4816,18 @@ def plano_operacional(payload: GestaoOperacionalPlanoOperacionalRequest):
         })
 
 
+def serializar_json_seguro(valor: Any) -> Any:
+    if isinstance(valor, (datetime, date)):
+        return valor.isoformat()
+    if isinstance(valor, Decimal):
+        return float(valor)
+    if isinstance(valor, dict):
+        return {chave: serializar_json_seguro(item) for chave, item in valor.items()}
+    if isinstance(valor, (list, tuple)):
+        return [serializar_json_seguro(item) for item in valor]
+    return valor
+
+
 def _acao_operacional_dict(row: tuple[Any, ...]) -> dict[str, Any]:
     campos = (
         "id", "tenant_id", "obra_codigo", "area", "disciplina", "titulo",
@@ -4823,7 +4836,7 @@ def _acao_operacional_dict(row: tuple[Any, ...]) -> dict[str, Any]:
         "referencia_comando_id", "metadados", "criado_em", "atualizado_em",
         "concluido_em",
     )
-    return dict(zip(campos, row))
+    return serializar_json_seguro(dict(zip(campos, row)))
 
 
 def _criar_acao_operacional(
@@ -4835,9 +4848,10 @@ def _criar_acao_operacional(
             obra_codigo, area, disciplina, titulo, descricao, prioridade,
             responsavel, prazo, referencia_documento_id, referencia_comando_id
         ) VALUES (
-            %(obra_codigo)s, %(area)s, %(disciplina)s, %(titulo)s, %(descricao)s,
-            %(prioridade)s, %(responsavel)s, %(prazo)s,
-            %(referencia_documento_id)s, %(referencia_comando_id)s
+            %(obra_codigo)s::text, %(area)s::text, %(disciplina)s::text,
+            %(titulo)s::text, %(descricao)s::text, %(prioridade)s::text,
+            %(responsavel)s::text, %(prazo)s::date,
+            %(referencia_documento_id)s::bigint, %(referencia_comando_id)s::bigint
         )
         RETURNING id, tenant_id, obra_codigo, area, disciplina, titulo, descricao,
                   origem, tipo_acao, prioridade, status, responsavel, prazo,
@@ -4866,9 +4880,9 @@ def _listar_acoes_operacionais(cur, payload: GestaoOperacionalListarAcoesRequest
     }
     base = """
         FROM acoes_operacionais_obra
-        WHERE obra_codigo = %(obra_codigo)s
-          AND (%(area)s IS NULL OR area = %(area)s)
-          AND (%(disciplina)s IS NULL OR disciplina = %(disciplina)s)
+        WHERE obra_codigo = %(obra_codigo)s::text
+          AND (%(area)s::text IS NULL OR area = %(area)s::text)
+          AND (%(disciplina)s::text IS NULL OR disciplina = %(disciplina)s::text)
     """
     cur.execute("SELECT status, count(*) " + base + " GROUP BY status", filtros)
     totais_status = {status: 0 for status in ("ABERTA", "EM_ANDAMENTO", "CONCLUIDA", "CANCELADA")}
@@ -4881,11 +4895,11 @@ def _listar_acoes_operacionais(cur, payload: GestaoOperacionalListarAcoesRequest
                   origem, tipo_acao, prioridade, status, responsavel, prazo,
                   referencia_documento_id, referencia_comando_id, metadados,
                   criado_em, atualizado_em, concluido_em """ + base + """
-          AND (%(status)s IS NULL OR status = %(status)s)
+          AND (%(status)s::text IS NULL OR status = %(status)s::text)
         ORDER BY CASE prioridade WHEN 'CRITICA' THEN 1 WHEN 'ALTA' THEN 2
                                  WHEN 'MEDIA' THEN 3 ELSE 4 END,
                  prazo NULLS LAST, criado_em, id
-        LIMIT %(limite)s
+        LIMIT %(limite)s::int
         """,
         filtros,
     )
@@ -4914,18 +4928,18 @@ def _atualizar_acao_operacional(cur, payload: GestaoOperacionalAtualizarAcaoRequ
     cur.execute(
         """
         UPDATE acoes_operacionais_obra
-        SET status = %(status)s,
-            concluido_em = CASE WHEN %(status)s = 'CONCLUIDA' THEN now() ELSE NULL END,
-            metadados = CASE WHEN %(observacao)s IS NULL THEN metadados ELSE
+        SET status = %(status)s::text,
+            concluido_em = CASE WHEN %(status)s::text = 'CONCLUIDA' THEN now() ELSE NULL END,
+            metadados = CASE WHEN %(observacao)s::text IS NULL THEN metadados ELSE
                 jsonb_set(
-                    metadados || jsonb_build_object('ultima_observacao', %(observacao)s),
+                    metadados || jsonb_build_object('ultima_observacao', %(observacao)s::text),
                     '{observacoes}',
                     COALESCE(metadados->'observacoes', '[]'::jsonb) ||
                         jsonb_build_array(jsonb_build_object(
-                            'texto', %(observacao)s, 'registrado_em', now()
+                            'texto', %(observacao)s::text, 'registrado_em', now()
                         ))
                 ) END
-        WHERE id = %(acao_id)s AND obra_codigo = %(obra_codigo)s
+        WHERE id = %(acao_id)s::bigint AND obra_codigo = %(obra_codigo)s::text
         RETURNING id, tenant_id, obra_codigo, area, disciplina, titulo, descricao,
                   origem, tipo_acao, prioridade, status, responsavel, prazo,
                   referencia_documento_id, referencia_comando_id, metadados,
@@ -5188,7 +5202,8 @@ def processar_comando_agente_gestao_operacional(
                     RETURNING status;
                     """,
                     {
-                        "id": comando["id"], "resultado": Json(resultado),
+                        "id": comando["id"],
+                        "resultado": Json(serializar_json_seguro(resultado)),
                         "status": status_resultado,
                         "mensagem_erro": resultado.get("erro_controlado"),
                     },
