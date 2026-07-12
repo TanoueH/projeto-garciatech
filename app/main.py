@@ -306,8 +306,17 @@ class GestaoOperacionalListarAcoesRequest(BaseModel):
 class GestaoOperacionalAtualizarAcaoRequest(BaseModel):
     obra_codigo: str
     acao_id: int = Field(gt=0)
-    status: str = Field(pattern="^(ABERTA|EM_ANDAMENTO|CONCLUIDA|CANCELADA)$")
+    status: str | None = Field(default=None, pattern="^(ABERTA|EM_ANDAMENTO|CONCLUIDA|CANCELADA)$")
+    prioridade: str | None = Field(default=None, pattern="^(BAIXA|MEDIA|ALTA|CRITICA)$")
+    responsavel: str | None = None
+    prazo: date | None = None
     observacao: str | None = None
+
+
+class GestaoOperacionalDetalheAcaoRequest(BaseModel):
+    obra_codigo: str
+    acao_id: int = Field(gt=0)
+    incluir_historico: bool = True
 
 
 def get_db_connection():
@@ -516,9 +525,21 @@ def classificar_intencao_executiva(conteudo: Optional[str]) -> dict[str, Any]:
             "confianca": 0.98,
             "justificativa": "Consulta interna de ações operacionais, sem alteração de sistemas externos.",
         }
+    detalhe_acao = re.fullmatch(r"(?:detalhar|historico da) acao\s+\d+", texto_comando_normalizado)
+    if detalhe_acao:
+        return {
+            "intencao": "DETALHAR_ACAO_OPERACIONAL_OBRA",
+            "agente_destino": "AGENTE_008_GESTAO_OPERACIONAL_OBRA",
+            "tipo_comando": "DETALHAR_ACAO_OPERACIONAL_OBRA",
+            "requer_aprovacao": False, "confianca": 0.99,
+            "justificativa": "Consulta ao detalhe e histórico auditável de ação operacional interna.",
+        }
     atualizar_acao = re.fullmatch(
-        r"(?:marcar acao\s+(\d+)\s+como\s+concluida|concluir acao\s+(\d+)|cancelar acao\s+(\d+))",
-        texto_comando_normalizado,
+        r"(?:definir responsavel da acao \d+ como .+|atribuir acao \d+ para .+|"
+        r"definir prazo da acao \d+ para \d{2} \d{2} \d{4}|prazo da acao \d+ \d{2} \d{2} \d{4}|"
+        r"alterar prioridade da acao \d+ para (?:baixa|media|alta|critica)|prioridade da acao \d+ (?:baixa|media|alta|critica)|"
+        r"colocar acao \d+ em andamento|marcar acao \d+ como concluida|cancelar acao \d+|"
+        r"(?:adicionar|registrar) observacao na acao \d+\s+.+)", texto_comando_normalizado,
     )
     if atualizar_acao:
         return {
@@ -1136,11 +1157,33 @@ def extrair_acao_operacional_telegram(conteudo: Optional[str]) -> dict[str, Any]
 
 def extrair_atualizacao_acao_telegram(conteudo: Optional[str]) -> dict[str, Any]:
     texto = normalizar_texto_comparacao(conteudo)
+    texto_original = (conteudo or "").strip()
     correspondencia = re.search(r"\b(\d+)\b", texto)
-    return {
-        "acao_id": int(correspondencia.group(1)) if correspondencia else 0,
-        "status": "CANCELADA" if texto.startswith("cancelar") else "CONCLUIDA",
-    }
+    resultado: dict[str, Any] = {"acao_id": int(correspondencia.group(1)) if correspondencia else 0}
+    if texto.startswith("cancelar"):
+        resultado["status"] = "CANCELADA"
+    elif "em andamento" in texto:
+        resultado["status"] = "EM_ANDAMENTO"
+    elif "concluida" in texto:
+        resultado["status"] = "CONCLUIDA"
+    prioridade = re.search(r"(?:para\s+|acao\s+\d+\s+)(baixa|media|alta|critica)$", texto)
+    if "prioridade" in texto and prioridade:
+        resultado["prioridade"] = prioridade.group(1).upper()
+    prazo = re.search(r"(\d{2}/\d{2}/\d{4})$", texto_original)
+    if "prazo" in texto and prazo:
+        resultado["prazo"] = datetime.strptime(prazo.group(1), "%d/%m/%Y").date().isoformat()
+    responsavel = re.search(r"(?:como|para)\s+(.+)$", texto)
+    if (texto.startswith("definir responsavel") or texto.startswith("atribuir acao")) and responsavel:
+        resultado["responsavel"] = responsavel.group(1).strip().title()
+    observacao = re.search(r":\s*(.+)$", texto_original)
+    if "observacao na acao" in texto and observacao:
+        resultado["observacao"] = observacao.group(1).strip()
+    return resultado
+
+
+def extrair_detalhe_acao_telegram(conteudo: Optional[str]) -> dict[str, Any]:
+    correspondencia = re.search(r"\b(\d+)\b", normalizar_texto_comparacao(conteudo))
+    return {"acao_id": int(correspondencia.group(1)) if correspondencia else 0, "incluir_historico": True}
 
 
 def extrair_pendencia_documental_telegram(conteudo: Optional[str]) -> dict[str, Any]:
@@ -5120,10 +5163,48 @@ def _listar_acoes_operacionais(cur, payload: GestaoOperacionalListarAcoesRequest
 def _atualizar_acao_operacional(cur, payload: GestaoOperacionalAtualizarAcaoRequest) -> dict[str, Any]:
     observacao = payload.observacao.strip() if payload.observacao else None
     cur.execute(
+        """SELECT id, tenant_id, obra_codigo, area, disciplina, titulo, descricao,
+                  origem, tipo_acao, prioridade, status, responsavel, prazo,
+                  referencia_documento_id, referencia_comando_id, metadados,
+                  criado_em, atualizado_em, concluido_em
+           FROM acoes_operacionais_obra
+           WHERE id = %(acao_id)s::bigint AND obra_codigo = %(obra_codigo)s::text
+           FOR UPDATE""",
+        payload.model_dump(),
+    )
+    row_anterior = cur.fetchone()
+    if row_anterior is None:
+        raise HTTPException(status_code=404, detail="Ação operacional não encontrada na obra informada.")
+    anterior = _acao_operacional_dict(row_anterior)
+    campos_informados = payload.model_fields_set
+    novo_status = payload.status if "status" in campos_informados else anterior["status"]
+    nova_prioridade = payload.prioridade if "prioridade" in campos_informados else anterior["prioridade"]
+    novo_responsavel = payload.responsavel if "responsavel" in campos_informados else anterior["responsavel"]
+    novo_prazo = payload.prazo if "prazo" in campos_informados else anterior["prazo"]
+    alteracoes = {
+        "status": anterior["status"] != novo_status,
+        "prioridade": anterior["prioridade"] != nova_prioridade,
+        "responsavel": anterior["responsavel"] != novo_responsavel,
+        "prazo": anterior["prazo"] != serializar_json_seguro(novo_prazo),
+        "observacao": observacao is not None,
+    }
+    if not any(alteracoes.values()):
+        return {
+            "ok": True, "alterado": False, "acao": anterior,
+            "resposta_telegram": f"ℹ️ Ação operacional #{anterior['id']} não teve alterações relevantes.",
+            **AGENTE_008_SEGURANCA_REGISTRO_INTERNO,
+        }
+    cur.execute(
         """
         UPDATE acoes_operacionais_obra
         SET status = %(status)s::text,
-            concluido_em = CASE WHEN %(status)s::text = 'CONCLUIDA' THEN now() ELSE NULL END,
+            prioridade = %(prioridade)s::text,
+            responsavel = %(responsavel)s::text,
+            prazo = %(prazo)s::date,
+            concluido_em = CASE
+                WHEN %(status)s::text = 'CONCLUIDA' AND status <> 'CONCLUIDA' THEN now()
+                WHEN %(status)s::text IN ('ABERTA', 'EM_ANDAMENTO') THEN NULL
+                ELSE concluido_em END,
             metadados = CASE WHEN %(observacao)s::text IS NULL THEN metadados ELSE
                 jsonb_set(
                     metadados || jsonb_build_object('ultima_observacao', %(observacao)s::text),
@@ -5139,19 +5220,90 @@ def _atualizar_acao_operacional(cur, payload: GestaoOperacionalAtualizarAcaoRequ
                   referencia_documento_id, referencia_comando_id, metadados,
                   criado_em, atualizado_em, concluido_em;
         """,
-        {**payload.model_dump(), "observacao": observacao},
+        {
+            **payload.model_dump(), "status": novo_status, "prioridade": nova_prioridade,
+            "responsavel": novo_responsavel, "prazo": novo_prazo, "observacao": observacao,
+        },
     )
     row = cur.fetchone()
     if row is None:
         raise HTTPException(status_code=404, detail="Ação operacional não encontrada na obra informada.")
     acao = _acao_operacional_dict(row)
+    cur.execute(
+        """INSERT INTO historico_acoes_operacionais_obra (
+               tenant_id, obra_codigo, acao_id, tipo_evento,
+               status_anterior, status_novo, prioridade_anterior, prioridade_nova,
+               responsavel_anterior, responsavel_novo, prazo_anterior, prazo_novo,
+               observacao, registrado_por, metadados
+           ) VALUES (
+               %(tenant_id)s, %(obra_codigo)s, %(acao_id)s, 'ATUALIZACAO',
+               %(status_anterior)s, %(status_novo)s, %(prioridade_anterior)s, %(prioridade_nova)s,
+               %(responsavel_anterior)s, %(responsavel_novo)s, %(prazo_anterior)s::date,
+               %(prazo_novo)s::date, %(observacao)s, 'AGENTE_008_GESTAO_OPERACIONAL_OBRA',
+               %(metadados)s
+           )""",
+        {
+            "tenant_id": acao["tenant_id"], "obra_codigo": acao["obra_codigo"],
+            "acao_id": acao["id"], "status_anterior": anterior["status"],
+            "status_novo": acao["status"], "prioridade_anterior": anterior["prioridade"],
+            "prioridade_nova": acao["prioridade"], "responsavel_anterior": anterior["responsavel"],
+            "responsavel_novo": acao["responsavel"], "prazo_anterior": anterior["prazo"],
+            "prazo_novo": acao["prazo"], "observacao": observacao,
+            "metadados": Json({"campos_alterados": [campo for campo, mudou in alteracoes.items() if mudou]}),
+        },
+    )
     return {
-        "ok": True, "acao": acao,
+        "ok": True, "alterado": True, "acao": acao,
         "resposta_telegram": (
-            f"✅ Ação operacional #{acao['id']} atualizada para {acao['status']}.\n"
+            f"✅ Ação operacional #{acao['id']} atualizada.\n"
+            f"Status: {acao['status']} | Prioridade: {acao['prioridade']}\n"
+            f"Responsável: {acao['responsavel'] or 'não definido'} | Prazo: {acao['prazo'] or 'não definido'}\n"
             "Registro interno; nenhuma alteração foi feita em cronograma, RDO ou OpenProject."
         ),
         **AGENTE_008_SEGURANCA_REGISTRO_INTERNO,
+    }
+
+
+def _detalhar_acao_operacional(cur, payload: GestaoOperacionalDetalheAcaoRequest) -> dict[str, Any]:
+    cur.execute(
+        """SELECT id, tenant_id, obra_codigo, area, disciplina, titulo, descricao,
+                  origem, tipo_acao, prioridade, status, responsavel, prazo,
+                  referencia_documento_id, referencia_comando_id, metadados,
+                  criado_em, atualizado_em, concluido_em
+           FROM acoes_operacionais_obra
+           WHERE id = %(acao_id)s::bigint AND obra_codigo = %(obra_codigo)s::text""",
+        payload.model_dump(),
+    )
+    row = cur.fetchone()
+    if row is None:
+        raise HTTPException(status_code=404, detail="Ação operacional não encontrada na obra informada.")
+    acao = _acao_operacional_dict(row)
+    historico: list[dict[str, Any]] = []
+    if payload.incluir_historico:
+        cur.execute(
+            """SELECT id, tenant_id, obra_codigo, acao_id, tipo_evento,
+                      status_anterior, status_novo, prioridade_anterior, prioridade_nova,
+                      responsavel_anterior, responsavel_novo, prazo_anterior, prazo_novo,
+                      observacao, origem, registrado_por, metadados, criado_em
+               FROM historico_acoes_operacionais_obra
+               WHERE acao_id = %(acao_id)s::bigint AND obra_codigo = %(obra_codigo)s::text
+               ORDER BY criado_em, id""",
+            payload.model_dump(),
+        )
+        campos = ("id", "tenant_id", "obra_codigo", "acao_id", "tipo_evento",
+                  "status_anterior", "status_novo", "prioridade_anterior", "prioridade_nova",
+                  "responsavel_anterior", "responsavel_novo", "prazo_anterior", "prazo_novo",
+                  "observacao", "origem", "registrado_por", "metadados", "criado_em")
+        historico = [serializar_json_seguro(dict(zip(campos, item))) for item in cur.fetchall()]
+    return {
+        "ok": True, "acao": acao, "historico": historico,
+        "resposta_telegram": (
+            f"🔎 Ação #{acao['id']} — {acao['titulo']}\n"
+            f"Status: {acao['status']} | Prioridade: {acao['prioridade']}\n"
+            f"Responsável: {acao['responsavel'] or 'não definido'} | Prazo: {acao['prazo'] or 'não definido'}\n"
+            f"Eventos no histórico: {len(historico)}"
+        ),
+        **AGENTE_008_SEGURANCA_CONSULTA,
     }
 
 
@@ -5174,6 +5326,13 @@ def atualizar_acao_operacional(payload: GestaoOperacionalAtualizarAcaoRequest):
     with get_db_connection() as conn:
         with conn.cursor() as cur:
             return _atualizar_acao_operacional(cur, payload)
+
+
+@app.post("/agentes/gestao-operacional/detalhe-acao-operacional")
+def detalhe_acao_operacional(payload: GestaoOperacionalDetalheAcaoRequest):
+    with get_db_connection() as conn:
+        with conn.cursor() as cur:
+            return _detalhar_acao_operacional(cur, payload)
 
 
 @app.post("/agentes/gestao-operacional/processar-comando")
@@ -5219,7 +5378,8 @@ def processar_comando_agente_gestao_operacional(
                           'GERAR_RESUMO_EXECUTIVO_OPERACIONAL_OBRA',
                           'CRIAR_ACAO_OPERACIONAL_OBRA',
                           'LISTAR_ACOES_OPERACIONAIS_OBRA',
-                          'ATUALIZAR_ACAO_OPERACIONAL_OBRA'
+                          'ATUALIZAR_ACAO_OPERACIONAL_OBRA',
+                          'DETALHAR_ACAO_OPERACIONAL_OBRA'
                       )
                       AND ce.status = 'PENDENTE'
                       AND (%(id_comando)s::uuid IS NULL OR ce.id_comando = %(id_comando)s::uuid)
@@ -5235,7 +5395,7 @@ def processar_comando_agente_gestao_operacional(
                     return {
                         "ok": True,
                         "agente": "AGENTE_008_GESTAO_OPERACIONAL_OBRA",
-                        "mvp": "0.7D",
+                        "mvp": "0.7E",
                         "status": "SEM_COMANDO_PENDENTE",
                         "message": (
                             "Nenhum comando PENDENTE para "
@@ -5383,6 +5543,14 @@ def processar_comando_agente_gestao_operacional(
                     resultado = _atualizar_acao_operacional(
                         cur, GestaoOperacionalAtualizarAcaoRequest(**dados_atualizacao)
                     )
+                elif comando["tipo_comando"] == "DETALHAR_ACAO_OPERACIONAL_OBRA":
+                    dados_detalhe = {
+                        **(comando["payload_comando"] or {}),
+                        "obra_codigo": comando["obra_codigo"],
+                    }
+                    resultado = _detalhar_acao_operacional(
+                        cur, GestaoOperacionalDetalheAcaoRequest(**dados_detalhe)
+                    )
                 else:
                     resultado = _resultado_consulta_documentos_classificados(
                         cur, comando["obra_codigo"], comando["payload_comando"]
@@ -5429,16 +5597,31 @@ def processar_comando_agente_gestao_operacional(
             conn.close()
     except Exception as exc:
         if comando is not None:
+            resultado_erro = {
+                "ok": False,
+                "erro_controlado": str(exc),
+                "resposta_telegram": (
+                    "Não foi possível processar o comando de gestão operacional. "
+                    "Nenhuma alteração externa foi realizada."
+                ),
+                **AGENTE_008_SEGURANCA_CONSULTA,
+            }
             try:
                 with get_db_connection() as error_conn:
                     with error_conn.cursor() as error_cur:
                         error_cur.execute(
                             """
                             UPDATE comandos_executivos
-                            SET status = 'ERRO', mensagem_erro = %(erro)s, atualizado_em = NOW()
+                            SET status = 'ERRO', resultado = %(resultado)s,
+                                mensagem_erro = %(erro)s,
+                                executado_por = 'AGENTE_008_GESTAO_OPERACIONAL_OBRA',
+                                executado_em = NOW(), atualizado_em = NOW()
                             WHERE id = %(id)s AND status = 'PENDENTE';
                             """,
-                            {"id": comando["id"], "erro": str(exc)},
+                            {
+                                "id": comando["id"], "erro": str(exc),
+                                "resultado": Json(serializar_json_seguro(resultado_erro)),
+                            },
                         )
             except Exception:
                 pass
@@ -5450,7 +5633,7 @@ def processar_comando_agente_gestao_operacional(
     return {
         "ok": True,
         "agente": "AGENTE_008_GESTAO_OPERACIONAL_OBRA",
-        "mvp": "0.7D",
+        "mvp": "0.7E",
         "status_comando": status_resultado,
         "id_comando": str(comando["id_comando"]),
         "tipo_comando": comando["tipo_comando"],
@@ -5665,6 +5848,7 @@ async def receber_entrada_telegram(
         "CRIAR_ACAO_OPERACIONAL_OBRA",
         "LISTAR_ACOES_OPERACIONAIS_OBRA",
         "ATUALIZAR_ACAO_OPERACIONAL_OBRA",
+        "DETALHAR_ACAO_OPERACIONAL_OBRA",
     }
     obra_codigo = payload.obra_codigo or "OBRA-CAIO"
     normalized = {
@@ -6234,6 +6418,12 @@ async def receber_entrada_telegram(
                             "obra_codigo": obra_codigo,
                             **extrair_atualizacao_acao_telegram(normalized["conteudo"]),
                             **AGENTE_008_SEGURANCA_REGISTRO_INTERNO,
+                        }
+                    elif classificacao["tipo_comando"] == "DETALHAR_ACAO_OPERACIONAL_OBRA":
+                        payload_comando = {
+                            "obra_codigo": obra_codigo,
+                            **extrair_detalhe_acao_telegram(normalized["conteudo"]),
+                            **AGENTE_008_SEGURANCA_CONSULTA,
                         }
 
                 cur.execute(
