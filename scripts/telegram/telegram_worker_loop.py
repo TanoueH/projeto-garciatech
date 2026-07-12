@@ -220,11 +220,10 @@ def processar_briefing_agendado(
 
     try:
         envio = enviar_mensagem_telegram(token, str(chat_id), str(resposta))
-        message_id = envio.get("message_id")
-        if message_id is None:
-            raise RuntimeError("Telegram não retornou message_id.")
-        confirmar_briefing(
-            confirmar_url, int(envio_id), "CONCLUIDO", telegram_message_id=str(message_id)
+
+        message_id = (
+             envio.get("result", {}).get("message_id")
+             or envio.get("message_id")
         )
         log_json(
             "briefing_agendado_enviado",
