@@ -48,7 +48,8 @@ def enviar_mensagem_telegram(token: str, chat_id: str, texto: str) -> dict[str, 
     )
     if not 200 <= status_code < 300 or body.get("ok") is not True:
         raise RuntimeError(f"Telegram sendMessage falhou com HTTP {status_code}.")
-    return {"http_status": status_code, "ok": True}
+    message_id = (body.get("result") or {}).get("message_id")
+    return {"http_status": status_code, "ok": True, "message_id": message_id}
 
 
 def imprimir_json(payload: dict[str, Any]) -> None:

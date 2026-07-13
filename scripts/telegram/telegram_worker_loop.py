@@ -225,6 +225,9 @@ def processar_briefing_agendado(
              envio.get("result", {}).get("message_id")
              or envio.get("message_id")
         )
+
+        if message_id is None:
+            raise RuntimeError(f"Telegram não retornou message_id. resposta={envio}")
         log_json(
             "briefing_agendado_enviado",
             envio_id=envio_id,
