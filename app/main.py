@@ -5,7 +5,7 @@ import json
 import os
 import uuid
 import unicodedata
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 from io import BytesIO
 from pathlib import Path
@@ -293,6 +293,15 @@ class GestaoOperacionalBriefingDiarioRequest(BaseModel):
     incluir_historico: bool = True
 
 
+class GestaoOperacionalRelatorioSemanalRequest(BaseModel):
+    obra_codigo: str
+    area: str | None = None
+    data_inicio: date | None = None
+    data_fim: date | None = None
+    limite_itens: int = Field(default=10, ge=1, le=50)
+    salvar_relatorio: bool = True
+
+
 class GestaoOperacionalBriefingDiarioAgendadoRequest(BaseModel):
     forcar: bool = False
 
@@ -535,6 +544,21 @@ def classificar_intencao_executiva(conteudo: Optional[str]) -> dict[str, Any]:
         "briefing operacional", "briefing executivo", "briefing do refeitorio",
         "resumo do dia do refeitorio",
     }
+    comandos_relatorio_semanal = {
+        "relatorio semanal da obra", "resumo semanal executivo",
+        "balanco semanal da obra", "o que aconteceu na obra esta semana",
+        "o que aconteceu na obra essa semana", "relatorio semanal executivo",
+        "relatorio semanal do refeitorio", "balanco semanal do refeitorio",
+    }
+    if texto_comando_normalizado in comandos_relatorio_semanal:
+        return {
+            "intencao": "GERAR_RELATORIO_SEMANAL_EXECUTIVO_OBRA",
+            "agente_destino": "AGENTE_008_GESTAO_OPERACIONAL_OBRA",
+            "tipo_comando": "GERAR_RELATORIO_SEMANAL_EXECUTIVO_OBRA",
+            "requer_aprovacao": False,
+            "confianca": 0.99,
+            "justificativa": "Relatório semanal executivo consultivo, sem alteração ou execução externa.",
+        }
     if texto_comando_normalizado in comandos_briefing_diario:
         return {
             "intencao": "GERAR_BRIEFING_DIARIO_OBRA",
@@ -5428,6 +5452,444 @@ def serializar_json_seguro(valor: Any) -> Any:
     return valor
 
 
+def _periodo_relatorio_semanal(
+    data_inicio: date | None, data_fim: date | None,
+) -> tuple[date, date]:
+    if (data_inicio is None) != (data_fim is None):
+        raise ValueError("data_inicio e data_fim devem ser informadas juntas.")
+    if data_inicio is not None and data_fim is not None:
+        if data_inicio > data_fim:
+            raise ValueError("data_inicio não pode ser posterior a data_fim.")
+        return data_inicio, data_fim
+
+    hoje_local = datetime.now(ZoneInfo("America/Sao_Paulo")).date()
+    inicio = hoje_local - timedelta(days=hoje_local.weekday())
+    return inicio, inicio + timedelta(days=6)
+
+
+def _data_operacional(valor: Any) -> date | None:
+    if isinstance(valor, datetime):
+        if valor.tzinfo is not None:
+            valor = valor.astimezone(ZoneInfo("America/Sao_Paulo"))
+        return valor.date()
+    if isinstance(valor, date):
+        return valor
+    if isinstance(valor, str) and valor.strip():
+        try:
+            return date.fromisoformat(valor.strip()[:10])
+        except ValueError:
+            return None
+    return None
+
+
+def _gerar_relatorio_semanal_executivo(
+    cur, obra_codigo: str, area: Optional[str], data_inicio: date,
+    data_fim: date, limite_itens: int, salvar_relatorio: bool,
+) -> dict[str, Any]:
+    fontes_indisponiveis: list[str] = []
+
+    def ler(tabela: str, colunas: list[str]) -> list[dict[str, Any]]:
+        linhas, erro = _linhas_fonte_operacional(cur, tabela, colunas, obra_codigo)
+        if erro:
+            fontes_indisponiveis.append(f"{tabela}: {_texto_curto(erro, 90)}")
+        return linhas
+
+    acoes = ler("acoes_operacionais_obra", [
+        "id", "area", "codigo_area", "status", "prioridade", "titulo", "descricao",
+        "responsavel", "prazo", "criado_em", "atualizado_em", "concluido_em",
+    ])
+    historico = ler("historico_acoes_operacionais_obra", [
+        "id", "acao_id", "tipo_evento", "status_anterior", "status_novo",
+        "prioridade_nova", "responsavel_novo", "prazo_novo", "observacao", "criado_em",
+    ])
+    classificacoes = ler("classificacoes_documentais_obra", [
+        "documento_id", "area_detectada", "codigo_area", "area", "status_revisao",
+        "numero_revisao", "eh_obsoleto", "eh_as_built", "confianca_classificacao",
+        "risco_documental", "nivel_risco", "criado_em", "atualizado_em", "updated_at",
+    ])
+    documentos = ler("documentos_minio_obra", [
+        "id", "nome_arquivo", "area", "codigo_area", "criado_em", "atualizado_em",
+        "ultima_modificacao",
+    ])
+    briefings = ler("envios_briefing_diario_obra", [
+        "id", "area", "data_briefing", "status", "criado_em", "enviado_em",
+    ])
+    comandos = ler("comandos_executivos", [
+        "id", "tipo_comando", "status", "payload_comando", "resultado", "justificativa",
+        "criado_em", "atualizado_em",
+    ])
+    pendencias = ler("pendencias_obra", [
+        "id", "area", "codigo_area", "area_detectada", "status", "status_pendencia",
+        "titulo", "descricao", "criticidade", "responsavel", "prazo", "data_prazo",
+        "criado_em", "atualizado_em",
+    ])
+    restricoes = ler("restricoes_atividade", [
+        "id", "atividade_id", "area", "codigo_area", "status", "status_restricao",
+        "titulo", "descricao", "criticidade", "responsavel", "prazo", "criado_em",
+        "atualizado_em",
+    ])
+    areas = ler("areas_obra", ["codigo_area", "nome_area", "ativo"])
+    atividades = ler("atividades_cronograma", [
+        "id", "codigo_area", "area", "frente_servico", "descricao", "status_atividade",
+    ])
+
+    filtro_area = normalizar_texto_comparacao(area).replace(" ", "_") if area else None
+    atividade_area = {
+        item.get("id"): item.get("codigo_area") or item.get("area")
+        for item in atividades
+    }
+    documento_area = {
+        item.get("id"): item.get("codigo_area") or item.get("area")
+        for item in documentos
+    }
+
+    def normalizar_area(valor: Any) -> str | None:
+        if valor is None:
+            return None
+        return normalizar_texto_comparacao(str(valor)).replace(" ", "_")
+
+    def area_item(
+        item: dict[str, Any], usar_atividade: bool = False,
+        usar_documento: bool = False,
+    ) -> str | None:
+        valor = item.get("codigo_area") or item.get("area") or item.get("area_detectada")
+        if not valor and usar_atividade:
+            valor = atividade_area.get(item.get("atividade_id"))
+        if not valor and usar_documento:
+            valor = documento_area.get(item.get("documento_id"))
+        return normalizar_area(valor)
+
+    def area_comando(item: dict[str, Any]) -> str | None:
+        payload = item.get("payload_comando")
+        return normalizar_area(payload.get("area")) if isinstance(payload, dict) else None
+
+    if filtro_area:
+        acoes = [item for item in acoes if area_item(item) == filtro_area]
+        ids_acoes = {item.get("id") for item in acoes}
+        historico = [item for item in historico if item.get("acao_id") in ids_acoes]
+        classificacoes = [
+            item for item in classificacoes if area_item(item, usar_documento=True) == filtro_area
+        ]
+        documentos = [item for item in documentos if area_item(item) == filtro_area]
+        briefings = [item for item in briefings if area_item(item) == filtro_area]
+        comandos = [item for item in comandos if area_comando(item) in {None, filtro_area}]
+        pendencias = [item for item in pendencias if area_item(item) == filtro_area]
+        restricoes = [item for item in restricoes if area_item(item, usar_atividade=True) == filtro_area]
+
+    def no_periodo(valor: Any) -> bool:
+        data_valor = _data_operacional(valor)
+        return data_valor is not None and data_inicio <= data_valor <= data_fim
+
+    def status(item: dict[str, Any], *campos: str) -> str:
+        valor = next((item.get(campo) for campo in campos if item.get(campo) is not None), "")
+        return normalizar_texto_comparacao(str(valor)).upper().replace(" ", "_")
+
+    def verdadeiro(valor: Any) -> bool:
+        return valor is True or str(valor).lower() in {"true", "t", "1", "sim"}
+
+    def baixa_confianca(item: dict[str, Any]) -> bool:
+        try:
+            return (
+                item.get("confianca_classificacao") is not None
+                and float(item["confianca_classificacao"]) < 0.70
+            )
+        except (TypeError, ValueError):
+            return False
+
+    status_encerrados = {
+        "CONCLUIDO", "CONCLUIDA", "CANCELADO", "CANCELADA", "RESOLVIDO", "RESOLVIDA",
+        "FECHADO", "FECHADA", "ENCERRADO", "ENCERRADA", "REJEITADO",
+        "LIBERADO", "LIBERADA",
+    }
+    abertas = [item for item in acoes if status(item, "status") == "ABERTA"]
+    em_andamento = [item for item in acoes if status(item, "status") == "EM_ANDAMENTO"]
+    nao_encerradas = abertas + em_andamento
+    altas_criticas = [
+        item for item in nao_encerradas
+        if status(item, "prioridade") in {"ALTA", "CRITICA"}
+    ]
+    sem_responsavel = [item for item in nao_encerradas if not item.get("responsavel")]
+    sem_prazo = [item for item in nao_encerradas if not item.get("prazo")]
+    hoje_local = datetime.now(ZoneInfo("America/Sao_Paulo")).date()
+    atrasadas = [
+        item for item in nao_encerradas
+        if _data_operacional(item.get("prazo")) is not None
+        and _data_operacional(item.get("prazo")) < hoje_local
+    ]
+    criadas_periodo = [item for item in acoes if no_periodo(item.get("criado_em"))]
+    ids_concluidos_historico = {
+        item.get("acao_id") for item in historico
+        if status(item, "status_novo") in {"CONCLUIDA", "CONCLUIDO"}
+        and no_periodo(item.get("criado_em"))
+    }
+    ids_cancelados_historico = {
+        item.get("acao_id") for item in historico
+        if status(item, "status_novo") in {"CANCELADA", "CANCELADO"}
+        and no_periodo(item.get("criado_em"))
+    }
+    concluidas_periodo = [
+        item for item in acoes
+        if item.get("id") in ids_concluidos_historico
+        or (status(item, "status") in {"CONCLUIDA", "CONCLUIDO"} and no_periodo(item.get("concluido_em")))
+    ]
+    canceladas_periodo = [
+        item for item in acoes
+        if item.get("id") in ids_cancelados_historico
+        or (status(item, "status") in {"CANCELADA", "CANCELADO"} and no_periodo(item.get("atualizado_em")))
+    ]
+
+    obsoletos = [
+        item for item in classificacoes
+        if verdadeiro(item.get("eh_obsoleto")) or status(item, "status_revisao") == "OBSOLETO"
+    ]
+    sem_revisao_docs = [
+        item for item in classificacoes
+        if not (item.get("numero_revisao") or item.get("status_revisao"))
+        or status(item, "status_revisao") in {"NAO_IDENTIFICADO", "SEM_REVISAO"}
+    ]
+    baixa_confianca_docs = [item for item in classificacoes if baixa_confianca(item)]
+    classificados_periodo = [
+        item for item in classificacoes
+        if no_periodo(item.get("criado_em") or item.get("atualizado_em") or item.get("updated_at"))
+    ]
+    alteracoes_documentais = [
+        item for item in classificacoes
+        if no_periodo(item.get("atualizado_em") or item.get("updated_at"))
+    ]
+    as_built = [item for item in classificacoes if verdadeiro(item.get("eh_as_built"))]
+
+    briefings_periodo = [
+        item for item in briefings
+        if no_periodo(item.get("data_briefing") or item.get("enviado_em") or item.get("criado_em"))
+        and status(item, "status") in {"CONCLUIDO", "ENVIADO"}
+    ]
+    envios_datas = [
+        item.get("enviado_em") or item.get("criado_em") for item in briefings_periodo
+        if item.get("enviado_em") or item.get("criado_em")
+    ]
+    ultimo_briefing = max(envios_datas, key=lambda valor: str(valor)) if envios_datas else None
+
+    pendencias_abertas = [
+        item for item in pendencias
+        if status(item, "status_pendencia", "status") not in status_encerrados
+    ]
+    restricoes_abertas = [
+        item for item in restricoes
+        if status(item, "status_restricao", "status") not in status_encerrados
+    ]
+    comandos_pendentes = [
+        item for item in comandos
+        if status(item, "status") in {"PENDENTE", "AGUARDANDO_APROVACAO", "APROVADO"}
+        and item.get("tipo_comando") != "GERAR_RELATORIO_SEMANAL_EXECUTIVO_OBRA"
+    ]
+
+    muitos_incertos = (
+        len(sem_revisao_docs) + len(baixa_confianca_docs)
+        >= max(5, (len(classificacoes) + 4) // 5)
+    )
+    if altas_criticas or obsoletos:
+        status_executivo = "BLOQUEIO_POTENCIAL"
+    elif muitos_incertos:
+        status_executivo = "REQUER_VALIDACAO_TECNICA"
+    elif nao_encerradas or pendencias_abertas or restricoes_abertas or fontes_indisponiveis:
+        status_executivo = "REQUER_ATENCAO"
+    else:
+        status_executivo = "SEM_ALERTAS_RELEVANTES"
+
+    def resumir_acao(item: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "id": item.get("id"),
+            "prioridade": status(item, "prioridade") or "NAO_INFORMADA",
+            "titulo": _texto_curto(item.get("titulo") or item.get("descricao") or "Ação sem título", 100),
+            "status": status(item, "status") or "NAO_INFORMADO",
+            "responsavel": _texto_curto(item.get("responsavel"), 60) or None,
+            "prazo": item.get("prazo"),
+        }
+
+    def resumir_documento(item: dict[str, Any]) -> dict[str, Any]:
+        documento = next(
+            (doc for doc in documentos if doc.get("id") == item.get("documento_id")), {}
+        )
+        return {
+            "documento_id": item.get("documento_id"),
+            "nome_arquivo": _texto_curto(documento.get("nome_arquivo") or "Documento classificado", 100),
+            "status_revisao": status(item, "status_revisao") or "NAO_IDENTIFICADO",
+            "obsoleto": item in obsoletos,
+            "baixa_confianca": item in baixa_confianca_docs,
+        }
+
+    decisoes: list[str] = []
+    for item in pendencias_abertas:
+        decisoes.append(_texto_curto(item.get("titulo") or item.get("descricao") or f"Pendência #{item.get('id')}", 120))
+    for item in restricoes_abertas:
+        decisoes.append(_texto_curto(item.get("titulo") or item.get("descricao") or f"Restrição #{item.get('id')}", 120))
+    for item in comandos_pendentes:
+        decisoes.append(_texto_curto(item.get("justificativa") or f"Comando {item.get('tipo_comando')} pendente", 120))
+    decisoes = list(dict.fromkeys(decisoes))[:5]
+
+    resumo_semana: list[str] = []
+    if criadas_periodo:
+        resumo_semana.append(f"{len(criadas_periodo)} ação(ões) operacional(is) criada(s) no período.")
+    if concluidas_periodo:
+        resumo_semana.append(f"{len(concluidas_periodo)} ação(ões) concluída(s) no período.")
+    if altas_criticas:
+        resumo_semana.append(f"{len(altas_criticas)} ação(ões) alta(s) ou crítica(s) permanece(m) aberta(s).")
+    if obsoletos or sem_revisao_docs or baixa_confianca_docs:
+        resumo_semana.append(
+            f"Documentação requer atenção: {len(obsoletos)} obsoleto(s), "
+            f"{len(sem_revisao_docs)} sem revisão e {len(baixa_confianca_docs)} com baixa confiança."
+        )
+    if briefings_periodo:
+        resumo_semana.append(f"{len(briefings_periodo)} briefing(s) diário(s) enviado(s) no período.")
+    if fontes_indisponiveis and len(resumo_semana) < 5:
+        resumo_semana.append("Relatório parcial: uma ou mais fontes operacionais não estavam disponíveis.")
+    if not resumo_semana:
+        resumo_semana.append("Não foram identificados eventos relevantes nas fontes disponíveis para o período.")
+    resumo_semana = [_texto_curto(item, 180) for item in resumo_semana[:5]]
+
+    recomendacoes: list[str] = []
+    if altas_criticas:
+        recomendacoes.append("Priorizar ações altas e críticas, confirmando responsável, prazo e evidência de tratamento.")
+    if sem_responsavel:
+        recomendacoes.append("Definir responsáveis para as ações abertas sem atribuição.")
+    if sem_prazo or atrasadas:
+        recomendacoes.append("Revisar prazos ausentes ou possivelmente atrasados com a equipe responsável.")
+    if obsoletos:
+        recomendacoes.append("Validar tecnicamente e segregar documentos obsoletos antes de qualquer uso em campo.")
+    if sem_revisao_docs or baixa_confianca_docs:
+        recomendacoes.append("Revisar documentos sem revisão identificada ou com baixa confiança de classificação.")
+    if not recomendacoes:
+        recomendacoes.append("Manter acompanhamento consultivo; qualquer liberação depende de validação técnica responsável.")
+    recomendacoes = [_texto_curto(item, 150) for item in recomendacoes[:5]]
+
+    nomes_area = {
+        area_item(item): str(item.get("nome_area") or item.get("codigo_area"))
+        for item in areas if area_item(item) and item.get("ativo") is not False
+    }
+    area_exibicao = nomes_area.get(filtro_area, area) if filtro_area else "todas"
+    acoes_telegram = sorted(
+        nao_encerradas,
+        key=lambda item: ({"CRITICA": 0, "ALTA": 1, "MEDIA": 2, "BAIXA": 3}.get(status(item, "prioridade"), 4), item.get("id") or 0),
+    )[:7]
+    linhas = [
+        f"📆 Relatório semanal executivo — {obra_codigo}", "", "Período:",
+        f"{data_inicio.strftime('%d/%m/%Y')} a {data_fim.strftime('%d/%m/%Y')}", "",
+        "Filtro:", f"Área: {area_exibicao}", "", "Status executivo:", status_executivo,
+        "", "Resumo da semana:", *[f"- {item}" for item in resumo_semana], "",
+        "Ações operacionais:", f"- Criadas: {len(criadas_periodo)}", f"- Abertas: {len(abertas)}",
+        f"- Em andamento: {len(em_andamento)}", f"- Concluídas: {len(concluidas_periodo)}",
+        f"- Altas/críticas abertas: {len(altas_criticas)}", "", "Documentação crítica:",
+        f"- Obsoletos: {len(obsoletos)}", f"- Sem revisão: {len(sem_revisao_docs)}",
+        f"- Baixa confiança: {len(baixa_confianca_docs)}", "", "Ações abertas relevantes:",
+        *([f"- #{item.get('id')} [{status(item, 'prioridade') or 'N/I'}] {_texto_curto(item.get('titulo') or item.get('descricao') or 'Ação sem título', 90)}" for item in acoes_telegram] or ["- Nenhuma ação aberta identificada."]),
+        "", "Decisões pendentes:", *([f"- {item}" for item in decisoes] or ["- Nenhuma decisão pendente identificada nas fontes disponíveis."]),
+        "", "Recomendações para a próxima semana:", *[f"- {item}" for item in recomendacoes],
+        "", "Modo: CONSULTA", "Nenhum cronograma, RDO, MinIO ou OpenProject foi alterado.",
+        "Este relatório não confirma liberação definitiva da obra ou de qualquer frente.",
+    ]
+
+    limite = max(1, min(limite_itens, 50))
+    resultado = {
+        "ok": True,
+        "mvp": "0.7H",
+        "tipo_relatorio": "RELATORIO_SEMANAL_EXECUTIVO",
+        "obra_codigo": obra_codigo,
+        "area": area,
+        "data_inicio": data_inicio,
+        "data_fim": data_fim,
+        "status_executivo": status_executivo,
+        "resumo_semana": resumo_semana,
+        "indicadores_acoes": {
+            "criadas_no_periodo": len(criadas_periodo), "abertas": len(abertas),
+            "em_andamento": len(em_andamento), "concluidas_no_periodo": len(concluidas_periodo),
+            "canceladas_no_periodo": len(canceladas_periodo),
+            "altas_ou_criticas_abertas": len(altas_criticas),
+            "sem_responsavel": len(sem_responsavel), "sem_prazo": len(sem_prazo),
+            "possivelmente_atrasadas": len(atrasadas),
+        },
+        "acoes_abertas": [resumir_acao(item) for item in nao_encerradas[:limite]],
+        "acoes_concluidas_no_periodo": [resumir_acao(item) for item in concluidas_periodo[:limite]],
+        "acoes_sem_responsavel": [resumir_acao(item) for item in sem_responsavel[:limite]],
+        "acoes_sem_prazo": [resumir_acao(item) for item in sem_prazo[:limite]],
+        "indicadores_documentais": {
+            "documentos_classificados": len(classificados_periodo),
+            "documentos_obsoletos": len(obsoletos),
+            "documentos_sem_revisao": len(sem_revisao_docs),
+            "documentos_baixa_confianca": len(baixa_confianca_docs),
+            "alteracoes_documentais": len(alteracoes_documentais), "as_built": len(as_built),
+        },
+        "documentos_criticos": [],
+        "briefing_diario": {
+            "total_briefings_enviados": len(briefings_periodo),
+            "ultimo_briefing_enviado_em": ultimo_briefing,
+        },
+        "decisoes_pendentes": decisoes,
+        "recomendacoes_proxima_semana": recomendacoes,
+        "resposta_telegram": "\n".join(linhas),
+        "fontes_indisponiveis": fontes_indisponiveis,
+        "flags_seguranca": dict(AGENTE_008_SEGURANCA_CONSULTA),
+        **AGENTE_008_SEGURANCA_CONSULTA,
+    }
+    # Reconstrói a lista crítica sem depender de hashabilidade dos registros de origem.
+    criticos_unicos: list[dict[str, Any]] = []
+    vistos: set[tuple[Any, ...]] = set()
+    for item in obsoletos + sem_revisao_docs + baixa_confianca_docs:
+        chave = (item.get("documento_id"), item.get("status_revisao"), item.get("numero_revisao"))
+        if chave not in vistos:
+            vistos.add(chave)
+            criticos_unicos.append(resumir_documento(item))
+    resultado["documentos_criticos"] = criticos_unicos[:limite]
+    resultado = serializar_json_seguro(resultado)
+
+    relatorio_id = None
+    if salvar_relatorio:
+        cur.execute(
+            """
+            INSERT INTO relatorios_semanais_executivos_obra (
+                obra_codigo, area, data_inicio, data_fim, payload_relatorio, resposta_telegram
+            ) VALUES (
+                %(obra_codigo)s, %(area)s, %(data_inicio)s, %(data_fim)s,
+                %(payload_relatorio)s, %(resposta_telegram)s
+            )
+            RETURNING id;
+            """,
+            {
+                "obra_codigo": obra_codigo, "area": area,
+                "data_inicio": data_inicio, "data_fim": data_fim,
+                "payload_relatorio": Json(resultado),
+                "resposta_telegram": resultado["resposta_telegram"],
+            },
+        )
+        relatorio_id = cur.fetchone()[0]
+    resultado["relatorio_id"] = relatorio_id
+    return serializar_json_seguro(resultado)
+
+
+@app.post("/agentes/gestao-operacional/relatorio-semanal-executivo")
+def relatorio_semanal_executivo(payload: GestaoOperacionalRelatorioSemanalRequest):
+    try:
+        data_inicio, data_fim = _periodo_relatorio_semanal(
+            payload.data_inicio, payload.data_fim,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail={"message": str(exc)})
+
+    try:
+        with get_db_connection() as conn:
+            with conn.cursor() as cur:
+                return _gerar_relatorio_semanal_executivo(
+                    cur, payload.obra_codigo, payload.area, data_inicio, data_fim,
+                    payload.limite_itens, payload.salvar_relatorio,
+                )
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail={
+            "message": "Erro ao gerar relatório semanal executivo consultivo.",
+            "error": _texto_curto(exc, 200),
+        })
+
+
 def _acao_operacional_dict(row: tuple[Any, ...]) -> dict[str, Any]:
     campos = (
         "id", "tenant_id", "obra_codigo", "area", "disciplina", "titulo",
@@ -5740,6 +6202,7 @@ def processar_comando_agente_gestao_operacional(
                           'GERAR_PLANO_OPERACIONAL_OBRA',
                           'GERAR_RESUMO_EXECUTIVO_OPERACIONAL_OBRA',
                           'GERAR_BRIEFING_DIARIO_OBRA',
+                          'GERAR_RELATORIO_SEMANAL_EXECUTIVO_OBRA',
                           'CRIAR_ACAO_OPERACIONAL_OBRA',
                           'LISTAR_ACOES_OPERACIONAIS_OBRA',
                           'ATUALIZAR_ACAO_OPERACIONAL_OBRA',
@@ -5759,7 +6222,7 @@ def processar_comando_agente_gestao_operacional(
                     return {
                         "ok": True,
                         "agente": "AGENTE_008_GESTAO_OPERACIONAL_OBRA",
-                        "mvp": "0.7E",
+                        "mvp": "0.7H",
                         "status": "SEM_COMANDO_PENDENTE",
                         "message": (
                             "Nenhum comando PENDENTE para "
@@ -5900,6 +6363,41 @@ def processar_comando_agente_gestao_operacional(
                             "resposta_telegram": "Não foi possível gerar o briefing diário executivo consultivo.",
                             **AGENTE_008_SEGURANCA_CONSULTA,
                         }
+                elif comando["tipo_comando"] == "GERAR_RELATORIO_SEMANAL_EXECUTIVO_OBRA":
+                    payload_relatorio_semanal = comando["payload_comando"] or {}
+                    try:
+                        data_inicio_informada = payload_relatorio_semanal.get("data_inicio")
+                        data_fim_informada = payload_relatorio_semanal.get("data_fim")
+                        for nome_data, valor_data in (
+                            ("data_inicio", data_inicio_informada),
+                            ("data_fim", data_fim_informada),
+                        ):
+                            if isinstance(valor_data, str) and not re.fullmatch(
+                                r"\d{4}-\d{2}-\d{2}", valor_data,
+                            ):
+                                raise ValueError(f"{nome_data} inválida. Use ISO YYYY-MM-DD.")
+                        data_inicio_convertida = _data_operacional(data_inicio_informada)
+                        data_fim_convertida = _data_operacional(data_fim_informada)
+                        if data_inicio_informada is not None and data_inicio_convertida is None:
+                            raise ValueError("data_inicio inválida. Use ISO YYYY-MM-DD.")
+                        if data_fim_informada is not None and data_fim_convertida is None:
+                            raise ValueError("data_fim inválida. Use ISO YYYY-MM-DD.")
+                        data_inicio, data_fim = _periodo_relatorio_semanal(
+                            data_inicio_convertida, data_fim_convertida,
+                        )
+                        resultado = _gerar_relatorio_semanal_executivo(
+                            cur, comando["obra_codigo"], payload_relatorio_semanal.get("area"),
+                            data_inicio, data_fim,
+                            max(1, min(int(payload_relatorio_semanal.get("limite_itens", 10)), 50)),
+                            bool(payload_relatorio_semanal.get("salvar_relatorio", True)),
+                        )
+                    except Exception as exc:
+                        resultado = {
+                            "ok": False,
+                            "erro_controlado": f"Relatório semanal não gerado: {_texto_curto(exc)}",
+                            "resposta_telegram": "Não foi possível gerar o relatório semanal executivo consultivo.",
+                            **AGENTE_008_SEGURANCA_CONSULTA,
+                        }
                 elif comando["tipo_comando"] == "CRIAR_ACAO_OPERACIONAL_OBRA":
                     dados_acao = {
                         **(comando["payload_comando"] or {}),
@@ -5945,6 +6443,7 @@ def processar_comando_agente_gestao_operacional(
                         "GERAR_PLANO_OPERACIONAL_OBRA",
                         "GERAR_RESUMO_EXECUTIVO_OPERACIONAL_OBRA",
                         "GERAR_BRIEFING_DIARIO_OBRA",
+                        "GERAR_RELATORIO_SEMANAL_EXECUTIVO_OBRA",
                     }
                     and resultado.get("ok") is False
                     else "CONCLUIDO"
@@ -6015,7 +6514,7 @@ def processar_comando_agente_gestao_operacional(
     return {
         "ok": True,
         "agente": "AGENTE_008_GESTAO_OPERACIONAL_OBRA",
-        "mvp": "0.7E",
+        "mvp": "0.7H",
         "status_comando": status_resultado,
         "id_comando": str(comando["id_comando"]),
         "tipo_comando": comando["tipo_comando"],
@@ -6228,6 +6727,7 @@ async def receber_entrada_telegram(
         "GERAR_PLANO_OPERACIONAL_OBRA",
         "GERAR_RESUMO_EXECUTIVO_OPERACIONAL_OBRA",
         "GERAR_BRIEFING_DIARIO_OBRA",
+        "GERAR_RELATORIO_SEMANAL_EXECUTIVO_OBRA",
         "CRIAR_ACAO_OPERACIONAL_OBRA",
         "LISTAR_ACOES_OPERACIONAIS_OBRA",
         "ATUALIZAR_ACAO_OPERACIONAL_OBRA",
@@ -6791,6 +7291,16 @@ async def receber_entrada_telegram(
                             "incluir_acoes": True,
                             "incluir_documentos": True,
                             "incluir_historico": True,
+                            **AGENTE_008_SEGURANCA_CONSULTA,
+                        }
+                    elif classificacao["tipo_comando"] == "GERAR_RELATORIO_SEMANAL_EXECUTIVO_OBRA":
+                        payload_comando = {
+                            "obra_codigo": obra_codigo,
+                            "area": extrair_area_diagnostico_operacional(normalized["conteudo"]),
+                            "data_inicio": None,
+                            "data_fim": None,
+                            "limite_itens": 10,
+                            "salvar_relatorio": True,
                             **AGENTE_008_SEGURANCA_CONSULTA,
                         }
                     elif classificacao["tipo_comando"] == "CRIAR_ACAO_OPERACIONAL_OBRA":
