@@ -5253,7 +5253,8 @@ def briefing_diario_agendado(
                 with conn.cursor() as cur:
                     cur.execute(
                         """
-                        SELECT id, status, resposta_telegram
+                        SELECT id, status, resposta_telegram,
+                               telegram_message_id, enviado_em
                         FROM envios_briefing_diario_obra
                         WHERE obra_codigo = %s AND COALESCE(area, '') = COALESCE(%s, '')
                           AND data_briefing = %s
@@ -5264,8 +5265,17 @@ def briefing_diario_agendado(
                         (config["obra_codigo"], config["area"], agora_local.date()),
                     )
                     existente = cur.fetchone()
-                    if existente and existente[1] == "CONCLUIDO" and not forcar:
-                        return _resposta_briefing_agendado("JA_ENVIADO", envio_id=existente[0])
+                    if existente and (
+                        existente[1] == "CONCLUIDO"
+                        or existente[3] is not None
+                        or existente[4] is not None
+                    ):
+                        return _resposta_briefing_agendado(
+                            "JA_ENVIADO",
+                            envio_id=existente[0],
+                            telegram_message_id=existente[3],
+                            enviado_em=existente[4],
+                        )
 
                     briefing = _gerar_briefing_diario(
                         cur, config["obra_codigo"], config["area"], config["limite_itens"],
@@ -5316,26 +5326,44 @@ def confirmar_envio_briefing_diario(payload: GestaoOperacionalConfirmarBriefingD
     try:
         with get_db_connection() as conn:
             with conn.cursor() as cur:
-                cur.execute(
-                    """
-                    UPDATE envios_briefing_diario_obra
-                    SET status = %s,
-                        telegram_message_id = CASE WHEN %s = 'CONCLUIDO' THEN %s ELSE telegram_message_id END,
-                        mensagem_erro = CASE WHEN %s = 'ERRO' THEN %s ELSE NULL END,
-                        enviado_em = CASE WHEN %s = 'CONCLUIDO' THEN now() ELSE enviado_em END,
-                        atualizado_em = now()
-                    WHERE id = %s
-                    RETURNING id
-                    """,
-                    (
-                        payload.status, payload.status, payload.telegram_message_id,
-                        payload.status, payload.mensagem_erro, payload.status, payload.envio_id,
-                    ),
-                )
+                if payload.status == "CONCLUIDO":
+                    cur.execute(
+                        """
+                        UPDATE envios_briefing_diario_obra
+                        SET status = 'CONCLUIDO',
+                            telegram_message_id = %s,
+                            enviado_em = now(),
+                            mensagem_erro = NULL,
+                            atualizado_em = now()
+                        WHERE id = %s
+                        RETURNING id, status, telegram_message_id, enviado_em,
+                                  mensagem_erro
+                        """,
+                        (payload.telegram_message_id, payload.envio_id),
+                    )
+                else:
+                    cur.execute(
+                        """
+                        UPDATE envios_briefing_diario_obra
+                        SET status = 'ERRO',
+                            mensagem_erro = %s,
+                            atualizado_em = now()
+                        WHERE id = %s
+                        RETURNING id, status, telegram_message_id, enviado_em,
+                                  mensagem_erro
+                        """,
+                        (payload.mensagem_erro, payload.envio_id),
+                    )
                 atualizado = cur.fetchone()
         if not atualizado:
             raise HTTPException(status_code=404, detail="Envio de briefing não encontrado.")
-        return _resposta_briefing_agendado(payload.status, envio_id=atualizado[0])
+        return _resposta_briefing_agendado(
+            atualizado[1],
+            envio_id=atualizado[0],
+            telegram_message_id=atualizado[2],
+            enviado_em=atualizado[3],
+            mensagem_erro=atualizado[4],
+        )
     except HTTPException:
         raise
     except Exception as exc:

@@ -35,6 +35,7 @@ DEFAULT_BRIEFING_URL = (
 DEFAULT_BRIEFING_CONFIRM_URL = f"{DEFAULT_BRIEFING_URL}/confirmar-envio"
 DEFAULT_INTERVAL_SECONDS = 5.0
 BRIEFING_CHECK_INTERVAL_SECONDS = 60.0
+_briefings_enviados_aguardando_confirmacao: dict[int, str] = {}
 
 
 def log_json(evento: str, **campos: Any) -> None:
@@ -211,6 +212,42 @@ def processar_briefing_agendado(
         log_json("briefing_agendado_erro", status=status, envio_id=envio_id)
         return {"status": status}
 
+    envio_id = int(envio_id)
+    message_id_pendente = _briefings_enviados_aguardando_confirmacao.get(envio_id)
+    if message_id_pendente is not None:
+        try:
+            confirmacao = confirmar_briefing(
+                confirmar_url,
+                envio_id,
+                "CONCLUIDO",
+                telegram_message_id=message_id_pendente,
+                mensagem_erro=None,
+            )
+            if confirmacao.get("status") != "CONCLUIDO":
+                raise RuntimeError(
+                    "API Core não confirmou status CONCLUIDO para briefing já enviado."
+                )
+            _briefings_enviados_aguardando_confirmacao.pop(envio_id, None)
+            log_json(
+                "briefing_agendado_confirmado",
+                envio_id=envio_id,
+                telegram_message_id=message_id_pendente,
+            )
+            return {
+                "status": "CONCLUIDO",
+                "envio_id": envio_id,
+                "telegram_message_id": message_id_pendente,
+            }
+        except Exception as exc:
+            erro = f"{type(exc).__name__}: {exc}"
+            log_json(
+                "briefing_agendado_confirmacao_erro",
+                envio_id=envio_id,
+                telegram_message_id=message_id_pendente,
+                erro=erro,
+            )
+            return {"status": "ERRO", "envio_id": envio_id, "erro": erro}
+
     chat_executivo = (os.getenv("TELEGRAM_EXECUTIVE_CHAT_ID") or "").strip()
     if not chat_executivo or str(chat_id) != chat_executivo:
         erro = "chat_id do agendamento não corresponde ao executivo autorizado."
@@ -221,25 +258,49 @@ def processar_briefing_agendado(
     try:
         envio = enviar_mensagem_telegram(token, str(chat_id), str(resposta))
 
-        message_id = (
-             envio.get("result", {}).get("message_id")
-             or envio.get("message_id")
+        telegram_message_id = (
+            envio.get("result", {}).get("message_id")
+            or envio.get("message_id")
         )
 
-        if message_id is None:
+        if telegram_message_id is None:
             raise RuntimeError(f"Telegram não retornou message_id. resposta={envio}")
+        telegram_message_id = str(telegram_message_id)
+        _briefings_enviados_aguardando_confirmacao[envio_id] = telegram_message_id
+        confirmacao = confirmar_briefing(
+            confirmar_url,
+            envio_id,
+            "CONCLUIDO",
+            telegram_message_id=telegram_message_id,
+            mensagem_erro=None,
+        )
+        if confirmacao.get("status") != "CONCLUIDO":
+            raise RuntimeError(
+                "API Core não confirmou status CONCLUIDO após envio do briefing."
+            )
+        _briefings_enviados_aguardando_confirmacao.pop(envio_id, None)
         log_json(
             "briefing_agendado_enviado",
             envio_id=envio_id,
-            telegram_message_id=str(message_id),
+            telegram_message_id=telegram_message_id,
         )
-        return {"status": "CONCLUIDO", "envio_id": envio_id}
+        return {
+            "status": "CONCLUIDO",
+            "envio_id": envio_id,
+            "telegram_message_id": telegram_message_id,
+        }
     except Exception as exc:
         erro = f"{type(exc).__name__}: {exc}"
-        try:
-            confirmar_briefing(confirmar_url, int(envio_id), "ERRO", mensagem_erro=erro)
-        except Exception as confirm_exc:
-            erro = f"{erro}; confirmação: {type(confirm_exc).__name__}: {confirm_exc}"
+        if envio_id not in _briefings_enviados_aguardando_confirmacao:
+            try:
+                confirmar_briefing(
+                    confirmar_url,
+                    envio_id,
+                    "ERRO",
+                    mensagem_erro=erro,
+                )
+            except Exception as confirm_exc:
+                erro = f"{erro}; confirmação: {type(confirm_exc).__name__}: {confirm_exc}"
         log_json("briefing_agendado_erro", envio_id=envio_id, erro=erro)
         return {"status": "ERRO", "envio_id": envio_id}
 
