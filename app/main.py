@@ -302,6 +302,17 @@ class GestaoOperacionalRelatorioSemanalRequest(BaseModel):
     salvar_relatorio: bool = True
 
 
+class GestaoOperacionalExportarRelatorioSemanalRequest(BaseModel):
+    obra_codigo: str
+    area: str | None = None
+    data_inicio: date | None = None
+    data_fim: date | None = None
+    relatorio_semanal_id: int | None = Field(default=None, gt=0)
+    formato: str = "MARKDOWN"
+    limite_itens: int = Field(default=10, ge=1, le=50)
+    salvar_exportacao: bool = True
+
+
 class GestaoOperacionalBriefingDiarioAgendadoRequest(BaseModel):
     forcar: bool = False
 
@@ -550,6 +561,24 @@ def classificar_intencao_executiva(conteudo: Optional[str]) -> dict[str, Any]:
         "o que aconteceu na obra essa semana", "relatorio semanal executivo",
         "relatorio semanal do refeitorio", "balanco semanal do refeitorio",
     }
+    comandos_exportar_relatorio_semanal = {
+        "exportar relatorio semanal da obra",
+        "gerar markdown do relatorio semanal",
+        "preparar relatorio semanal para revisao",
+        "exportar relatorio semanal do refeitorio",
+        "preparar relatorio semanal do refeitorio",
+    }
+    if texto_comando_normalizado in comandos_exportar_relatorio_semanal:
+        return {
+            "intencao": "EXPORTAR_RELATORIO_SEMANAL_EXECUTIVO_OBRA",
+            "agente_destino": "AGENTE_008_GESTAO_OPERACIONAL_OBRA",
+            "tipo_comando": "EXPORTAR_RELATORIO_SEMANAL_EXECUTIVO_OBRA",
+            "requer_aprovacao": False,
+            "confianca": 0.99,
+            "justificativa": (
+                "Exportação Markdown consultiva para revisão interna, sem envio ou execução externa."
+            ),
+        }
     if texto_comando_normalizado in comandos_relatorio_semanal:
         return {
             "intencao": "GERAR_RELATORIO_SEMANAL_EXECUTIVO_OBRA",
@@ -1085,6 +1114,12 @@ AGENTE_008_SEGURANCA_CONSULTA = {
 AGENTE_008_SEGURANCA_REGISTRO_INTERNO = {
     **AGENTE_008_SEGURANCA_CONSULTA,
     "modo": "REGISTRO_INTERNO",
+}
+
+AGENTE_008_SEGURANCA_EXPORTACAO = {
+    **AGENTE_008_SEGURANCA_CONSULTA,
+    "formato": "MARKDOWN",
+    "gera_pdf": False,
 }
 
 
@@ -5680,7 +5715,10 @@ def _gerar_relatorio_semanal_executivo(
     comandos_pendentes = [
         item for item in comandos
         if status(item, "status") in {"PENDENTE", "AGUARDANDO_APROVACAO", "APROVADO"}
-        and item.get("tipo_comando") != "GERAR_RELATORIO_SEMANAL_EXECUTIVO_OBRA"
+        and item.get("tipo_comando") not in {
+            "GERAR_RELATORIO_SEMANAL_EXECUTIVO_OBRA",
+            "EXPORTAR_RELATORIO_SEMANAL_EXECUTIVO_OBRA",
+        }
     ]
 
     muitos_incertos = (
@@ -5696,6 +5734,13 @@ def _gerar_relatorio_semanal_executivo(
     else:
         status_executivo = "SEM_ALERTAS_RELEVANTES"
 
+    conclusao_por_acao = {
+        item.get("acao_id"): item.get("criado_em")
+        for item in historico
+        if status(item, "status_novo") in {"CONCLUIDA", "CONCLUIDO"}
+        and item.get("acao_id") is not None
+    }
+
     def resumir_acao(item: dict[str, Any]) -> dict[str, Any]:
         return {
             "id": item.get("id"),
@@ -5704,6 +5749,7 @@ def _gerar_relatorio_semanal_executivo(
             "status": status(item, "status") or "NAO_INFORMADO",
             "responsavel": _texto_curto(item.get("responsavel"), 60) or None,
             "prazo": item.get("prazo"),
+            "concluido_em": item.get("concluido_em") or conclusao_por_acao.get(item.get("id")),
         }
 
     def resumir_documento(item: dict[str, Any]) -> dict[str, Any]:
@@ -5865,6 +5911,284 @@ def _gerar_relatorio_semanal_executivo(
     return serializar_json_seguro(resultado)
 
 
+def _formatar_data_br(valor: Any) -> str:
+    data_valor = _data_operacional(valor)
+    return data_valor.strftime("%d/%m/%Y") if data_valor else "não informada"
+
+
+def _texto_markdown(valor: Any, padrao: str = "Não informado") -> str:
+    texto = re.sub(r"\s+", " ", str(valor or "").strip()).replace("|", "\\|")
+    return texto or padrao
+
+
+def _carregar_ou_gerar_relatorio_para_exportacao(
+    cur,
+    obra_codigo: str,
+    area: Optional[str],
+    data_inicio: date | None,
+    data_fim: date | None,
+    relatorio_semanal_id: int | None,
+    limite_itens: int,
+) -> tuple[dict[str, Any], int | None, bool]:
+    if relatorio_semanal_id is not None:
+        cur.execute(
+            """
+            SELECT obra_codigo, area, data_inicio, data_fim, payload_relatorio
+            FROM relatorios_semanais_executivos_obra
+            WHERE id = %(id)s;
+            """,
+            {"id": relatorio_semanal_id},
+        )
+        row = cur.fetchone()
+        if row is None:
+            raise ValueError("RELATORIO_SEMANAL_NAO_ENCONTRADO")
+        if row[0] != obra_codigo:
+            raise ValueError("RELATORIO_SEMANAL_NAO_PERTENCE_A_OBRA")
+        if not isinstance(row[4], dict):
+            raise ValueError("PAYLOAD_RELATORIO_SEMANAL_INVALIDO")
+        relatorio = {
+            **row[4],
+            "obra_codigo": row[0],
+            "area": row[1],
+            "data_inicio": row[2],
+            "data_fim": row[3],
+            "relatorio_id": relatorio_semanal_id,
+        }
+        return serializar_json_seguro(relatorio), relatorio_semanal_id, True
+
+    inicio, fim = _periodo_relatorio_semanal(data_inicio, data_fim)
+    relatorio = _gerar_relatorio_semanal_executivo(
+        cur, obra_codigo, area, inicio, fim, limite_itens, False,
+    )
+    return serializar_json_seguro(relatorio), None, False
+
+
+def _montar_markdown_relatorio_semanal(relatorio: dict[str, Any]) -> tuple[str, str]:
+    obra_codigo = _texto_markdown(relatorio.get("obra_codigo"))
+    area = relatorio.get("area")
+    area_exibicao = _texto_markdown(str(area).replace("_", " ").title()) if area else "Todas"
+    data_inicio = _formatar_data_br(relatorio.get("data_inicio"))
+    data_fim = _formatar_data_br(relatorio.get("data_fim"))
+    status_executivo = _texto_markdown(relatorio.get("status_executivo"))
+
+    resumo = [
+        _texto_markdown(item)
+        for item in (relatorio.get("resumo_semana") or [])
+        if item
+    ][:4]
+    complementos = [
+        f"O status executivo consolidado é {status_executivo} e requer revisão técnica responsável.",
+        "Os indicadores abaixo refletem somente as fontes operacionais disponíveis no período.",
+        "Este material é consultivo e não representa liberação definitiva da obra ou de qualquer frente.",
+    ]
+    for complemento in complementos:
+        if len(resumo) >= 3:
+            break
+        resumo.append(complemento)
+    resumo = resumo[:6]
+
+    indicadores_acoes = relatorio.get("indicadores_acoes") or {}
+    indicadores_documentais = relatorio.get("indicadores_documentais") or {}
+    acoes_abertas = relatorio.get("acoes_abertas") or []
+    acoes_concluidas = relatorio.get("acoes_concluidas_no_periodo") or []
+    decisoes = relatorio.get("decisoes_pendentes") or []
+    recomendacoes = relatorio.get("recomendacoes_proxima_semana") or []
+
+    linhas = [
+        f"# Relatório Semanal Executivo — {obra_codigo}",
+        "",
+        f"**Período:** {data_inicio} a {data_fim}  ",
+        f"**Área:** {area_exibicao}  ",
+        f"**Status executivo:** {status_executivo}  ",
+        "**Gerado por:** AGENTE_008_GESTAO_OPERACIONAL_OBRA  ",
+        "**Modo:** CONSULTA  ",
+        "",
+        "---",
+        "",
+        "## 1. Sumário executivo",
+        "",
+        *resumo,
+        "",
+        "---",
+        "",
+        "## 2. Indicadores operacionais da semana",
+        "",
+        "| Indicador | Valor |",
+        "|---|---:|",
+        f"| Ações criadas no período | {indicadores_acoes.get('criadas_no_periodo', 0)} |",
+        f"| Ações abertas | {indicadores_acoes.get('abertas', 0)} |",
+        f"| Ações em andamento | {indicadores_acoes.get('em_andamento', 0)} |",
+        f"| Ações concluídas no período | {indicadores_acoes.get('concluidas_no_periodo', 0)} |",
+        f"| Ações altas/críticas abertas | {indicadores_acoes.get('altas_ou_criticas_abertas', 0)} |",
+        f"| Ações sem responsável | {indicadores_acoes.get('sem_responsavel', 0)} |",
+        f"| Ações sem prazo | {indicadores_acoes.get('sem_prazo', 0)} |",
+        "",
+        "---",
+        "",
+        "## 3. Ações abertas relevantes",
+        "",
+        *(
+            [
+                f"- #{item.get('id')} [{_texto_markdown(item.get('prioridade'), 'N/I')}] "
+                f"{_texto_markdown(item.get('titulo'), 'Ação sem título')} — "
+                f"{_texto_markdown(item.get('status'), 'N/I')}"
+                for item in acoes_abertas
+            ]
+            or ["- Nenhuma ação aberta relevante identificada."]
+        ),
+        "",
+        "---",
+        "",
+        "## 4. Ações concluídas no período",
+        "",
+        *(
+            [
+                f"- #{item.get('id')} {_texto_markdown(item.get('titulo'), 'Ação sem título')} "
+                f"— Concluída em {_formatar_data_br(item.get('concluido_em'))}"
+                for item in acoes_concluidas
+            ]
+            or ["- Nenhuma ação concluída identificada no período."]
+        ),
+        "",
+        "---",
+        "",
+        "## 5. Documentação crítica",
+        "",
+        "| Item | Quantidade |",
+        "|---|---:|",
+        f"| Documentos obsoletos | {indicadores_documentais.get('documentos_obsoletos', 0)} |",
+        f"| Documentos sem revisão identificada | {indicadores_documentais.get('documentos_sem_revisao', 0)} |",
+        f"| Documentos com baixa confiança | {indicadores_documentais.get('documentos_baixa_confianca', 0)} |",
+        f"| Alterações documentais | {indicadores_documentais.get('alteracoes_documentais', 0)} |",
+        f"| As Built | {indicadores_documentais.get('as_built', 0)} |",
+        "",
+        "---",
+        "",
+        "## 6. Decisões pendentes",
+        "",
+        *([f"- {_texto_markdown(item)}" for item in decisoes] or ["- Nenhuma decisão pendente identificada nas fontes disponíveis."]),
+        "",
+        "---",
+        "",
+        "## 7. Recomendações para a próxima semana",
+        "",
+        *([f"- {_texto_markdown(item)}" for item in recomendacoes] or ["- Manter acompanhamento consultivo e validação técnica responsável."]),
+        "",
+        "---",
+        "",
+        "## 8. Observações de segurança e governança",
+        "",
+        "Este relatório é consultivo.",
+        "Nenhum cronograma oficial foi alterado.",
+        "Nenhum RDO oficial foi alterado.",
+        "Nenhum arquivo foi enviado a terceiros.",
+        "Nenhum RPA foi acionado.",
+        "Nenhuma sincronização com OpenProject foi executada.",
+        "Nenhum link público foi gerado.",
+    ]
+    return "\n".join(linhas), "\n".join(resumo)
+
+
+def _exportar_relatorio_semanal_controlado(
+    cur,
+    payload: GestaoOperacionalExportarRelatorioSemanalRequest,
+) -> dict[str, Any]:
+    formato = payload.formato.strip().upper()
+    if formato != "MARKDOWN":
+        raise ValueError("FORMATO_NAO_SUPORTADO_NESTE_MVP")
+
+    relatorio, relatorio_id, reutilizou_relatorio = _carregar_ou_gerar_relatorio_para_exportacao(
+        cur,
+        payload.obra_codigo,
+        payload.area,
+        payload.data_inicio,
+        payload.data_fim,
+        payload.relatorio_semanal_id,
+        payload.limite_itens,
+    )
+    conteudo_markdown, resumo_executivo = _montar_markdown_relatorio_semanal(relatorio)
+    titulo = f"Relatório Semanal Executivo — {relatorio['obra_codigo']}"
+    metadados = serializar_json_seguro({
+        "mvp": "0.7I",
+        "relatorio_reutilizado": reutilizou_relatorio,
+        "flags_seguranca": dict(AGENTE_008_SEGURANCA_EXPORTACAO),
+    })
+
+    exportacao_id = None
+    if payload.salvar_exportacao:
+        cur.execute(
+            """
+            INSERT INTO exportacoes_relatorios_semanais_obra (
+                obra_codigo, area, relatorio_semanal_id, data_inicio, data_fim,
+                formato, status, titulo, conteudo_markdown, resumo_executivo,
+                enviado_para_terceiros, alterou_rdo_oficial, alterou_cronograma,
+                executou_rpa, sincronizou_openproject, gerou_pdf, gerou_link_publico,
+                metadados
+            ) VALUES (
+                %(obra_codigo)s, %(area)s, %(relatorio_semanal_id)s,
+                %(data_inicio)s, %(data_fim)s, 'MARKDOWN', 'GERADO', %(titulo)s,
+                %(conteudo_markdown)s, %(resumo_executivo)s, false, false, false,
+                false, false, false, false, %(metadados)s
+            )
+            RETURNING id;
+            """,
+            {
+                "obra_codigo": relatorio["obra_codigo"],
+                "area": relatorio.get("area"),
+                "relatorio_semanal_id": relatorio_id,
+                "data_inicio": _data_operacional(relatorio.get("data_inicio")),
+                "data_fim": _data_operacional(relatorio.get("data_fim")),
+                "titulo": titulo,
+                "conteudo_markdown": conteudo_markdown,
+                "resumo_executivo": resumo_executivo,
+                "metadados": Json(metadados),
+            },
+        )
+        exportacao_id = cur.fetchone()[0]
+
+    resumo_telegram = [
+        _texto_markdown(item)
+        for item in (relatorio.get("resumo_semana") or [])
+        if item
+    ][:2]
+    if not resumo_telegram:
+        resumo_telegram = ["Relatório consolidado a partir das fontes disponíveis."]
+    identificador_exportacao = f"#{exportacao_id}" if exportacao_id is not None else "não persistida"
+    resposta_telegram = "\n".join([
+        f"📄 Relatório semanal exportado — {relatorio['obra_codigo']}",
+        "", "Período:",
+        f"{_formatar_data_br(relatorio.get('data_inicio'))} a {_formatar_data_br(relatorio.get('data_fim'))}",
+        "", "Formato:", "MARKDOWN", "", "Exportação:", identificador_exportacao,
+        "", "Status executivo:", str(relatorio.get("status_executivo") or "NÃO INFORMADO"),
+        "", "Resumo:", *[f"- {item}" for item in resumo_telegram],
+        "", "Governança:",
+        "Relatório gerado para revisão interna. Nenhum envio externo, PDF, RDO, cronograma, MinIO, OpenProject ou RPA foi alterado.",
+    ])
+
+    resultado = {
+        "ok": True,
+        "mvp": "0.7I",
+        "tipo_exportacao": "RELATORIO_SEMANAL_EXECUTIVO",
+        "exportacao_id": exportacao_id,
+        "relatorio_semanal_id": relatorio_id,
+        "obra_codigo": relatorio["obra_codigo"],
+        "area": relatorio.get("area"),
+        "data_inicio": relatorio.get("data_inicio"),
+        "data_fim": relatorio.get("data_fim"),
+        "formato": formato,
+        "status": "GERADO",
+        "status_executivo": relatorio.get("status_executivo"),
+        "titulo": titulo,
+        "conteudo_markdown": conteudo_markdown,
+        "resumo_executivo": resumo_executivo,
+        "resposta_telegram": resposta_telegram,
+        "salvar_exportacao": payload.salvar_exportacao,
+        "flags_seguranca": dict(AGENTE_008_SEGURANCA_EXPORTACAO),
+        **AGENTE_008_SEGURANCA_EXPORTACAO,
+    }
+    return serializar_json_seguro(resultado)
+
+
 @app.post("/agentes/gestao-operacional/relatorio-semanal-executivo")
 def relatorio_semanal_executivo(payload: GestaoOperacionalRelatorioSemanalRequest):
     try:
@@ -5886,6 +6210,37 @@ def relatorio_semanal_executivo(payload: GestaoOperacionalRelatorioSemanalReques
     except Exception as exc:
         raise HTTPException(status_code=500, detail={
             "message": "Erro ao gerar relatório semanal executivo consultivo.",
+            "error": _texto_curto(exc, 200),
+        })
+
+
+@app.post("/agentes/gestao-operacional/exportar-relatorio-semanal")
+def exportar_relatorio_semanal(
+    payload: GestaoOperacionalExportarRelatorioSemanalRequest,
+):
+    if payload.formato.strip().upper() != "MARKDOWN":
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "code": "FORMATO_NAO_SUPORTADO_NESTE_MVP",
+                "message": "FORMATO_NAO_SUPORTADO_NESTE_MVP",
+            },
+        )
+    try:
+        with get_db_connection() as conn:
+            with conn.cursor() as cur:
+                resultado = _exportar_relatorio_semanal_controlado(cur, payload)
+        return serializar_json_seguro(resultado)
+    except ValueError as exc:
+        codigo = str(exc)
+        status_code = 404 if codigo == "RELATORIO_SEMANAL_NAO_ENCONTRADO" else 422
+        raise HTTPException(
+            status_code=status_code,
+            detail={"code": codigo, "message": codigo},
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail={
+            "message": "Erro ao exportar relatório semanal executivo.",
             "error": _texto_curto(exc, 200),
         })
 
@@ -6203,6 +6558,7 @@ def processar_comando_agente_gestao_operacional(
                           'GERAR_RESUMO_EXECUTIVO_OPERACIONAL_OBRA',
                           'GERAR_BRIEFING_DIARIO_OBRA',
                           'GERAR_RELATORIO_SEMANAL_EXECUTIVO_OBRA',
+                          'EXPORTAR_RELATORIO_SEMANAL_EXECUTIVO_OBRA',
                           'CRIAR_ACAO_OPERACIONAL_OBRA',
                           'LISTAR_ACOES_OPERACIONAIS_OBRA',
                           'ATUALIZAR_ACAO_OPERACIONAL_OBRA',
@@ -6222,7 +6578,7 @@ def processar_comando_agente_gestao_operacional(
                     return {
                         "ok": True,
                         "agente": "AGENTE_008_GESTAO_OPERACIONAL_OBRA",
-                        "mvp": "0.7H",
+                        "mvp": "0.7I",
                         "status": "SEM_COMANDO_PENDENTE",
                         "message": (
                             "Nenhum comando PENDENTE para "
@@ -6398,6 +6754,34 @@ def processar_comando_agente_gestao_operacional(
                             "resposta_telegram": "Não foi possível gerar o relatório semanal executivo consultivo.",
                             **AGENTE_008_SEGURANCA_CONSULTA,
                         }
+                elif comando["tipo_comando"] == "EXPORTAR_RELATORIO_SEMANAL_EXECUTIVO_OBRA":
+                    payload_exportacao = {
+                        **(comando["payload_comando"] or {}),
+                        "obra_codigo": comando["obra_codigo"],
+                    }
+                    try:
+                        resultado = _exportar_relatorio_semanal_controlado(
+                            cur,
+                            GestaoOperacionalExportarRelatorioSemanalRequest(
+                                **payload_exportacao
+                            ),
+                        )
+                    except Exception as exc:
+                        codigo_erro = str(exc)
+                        resultado = {
+                            "ok": False,
+                            "codigo_erro": codigo_erro,
+                            "erro_controlado": (
+                                "Exportação do relatório semanal não gerada: "
+                                f"{_texto_curto(exc)}"
+                            ),
+                            "resposta_telegram": (
+                                "Não foi possível exportar o relatório semanal em Markdown. "
+                                f"Código: {codigo_erro}. Nenhuma ação externa foi realizada."
+                            ),
+                            "flags_seguranca": dict(AGENTE_008_SEGURANCA_EXPORTACAO),
+                            **AGENTE_008_SEGURANCA_EXPORTACAO,
+                        }
                 elif comando["tipo_comando"] == "CRIAR_ACAO_OPERACIONAL_OBRA":
                     dados_acao = {
                         **(comando["payload_comando"] or {}),
@@ -6444,6 +6828,7 @@ def processar_comando_agente_gestao_operacional(
                         "GERAR_RESUMO_EXECUTIVO_OPERACIONAL_OBRA",
                         "GERAR_BRIEFING_DIARIO_OBRA",
                         "GERAR_RELATORIO_SEMANAL_EXECUTIVO_OBRA",
+                        "EXPORTAR_RELATORIO_SEMANAL_EXECUTIVO_OBRA",
                     }
                     and resultado.get("ok") is False
                     else "CONCLUIDO"
@@ -6478,6 +6863,11 @@ def processar_comando_agente_gestao_operacional(
             conn.close()
     except Exception as exc:
         if comando is not None:
+            flags_erro = (
+                AGENTE_008_SEGURANCA_EXPORTACAO
+                if comando["tipo_comando"] == "EXPORTAR_RELATORIO_SEMANAL_EXECUTIVO_OBRA"
+                else AGENTE_008_SEGURANCA_CONSULTA
+            )
             resultado_erro = {
                 "ok": False,
                 "erro_controlado": str(exc),
@@ -6485,7 +6875,8 @@ def processar_comando_agente_gestao_operacional(
                     "Não foi possível processar o comando de gestão operacional. "
                     "Nenhuma alteração externa foi realizada."
                 ),
-                **AGENTE_008_SEGURANCA_CONSULTA,
+                "flags_seguranca": dict(flags_erro),
+                **flags_erro,
             }
             try:
                 with get_db_connection() as error_conn:
@@ -6511,10 +6902,10 @@ def processar_comando_agente_gestao_operacional(
             detail={"message": "Erro ao processar comando de gestão operacional.", "error": str(exc)},
         )
 
-    return {
+    return serializar_json_seguro({
         "ok": True,
         "agente": "AGENTE_008_GESTAO_OPERACIONAL_OBRA",
-        "mvp": "0.7H",
+        "mvp": "0.7I",
         "status_comando": status_resultado,
         "id_comando": str(comando["id_comando"]),
         "tipo_comando": comando["tipo_comando"],
@@ -6522,7 +6913,7 @@ def processar_comando_agente_gestao_operacional(
         "telegram_chat_id": comando["telegram_chat_id"],
         "resposta_telegram": resultado["resposta_telegram"],
         "resultado": resultado,
-    }
+    })
 
 
 @app.post("/webhooks/entrada")
@@ -6728,6 +7119,7 @@ async def receber_entrada_telegram(
         "GERAR_RESUMO_EXECUTIVO_OPERACIONAL_OBRA",
         "GERAR_BRIEFING_DIARIO_OBRA",
         "GERAR_RELATORIO_SEMANAL_EXECUTIVO_OBRA",
+        "EXPORTAR_RELATORIO_SEMANAL_EXECUTIVO_OBRA",
         "CRIAR_ACAO_OPERACIONAL_OBRA",
         "LISTAR_ACOES_OPERACIONAIS_OBRA",
         "ATUALIZAR_ACAO_OPERACIONAL_OBRA",
@@ -7302,6 +7694,18 @@ async def receber_entrada_telegram(
                             "limite_itens": 10,
                             "salvar_relatorio": True,
                             **AGENTE_008_SEGURANCA_CONSULTA,
+                        }
+                    elif classificacao["tipo_comando"] == "EXPORTAR_RELATORIO_SEMANAL_EXECUTIVO_OBRA":
+                        payload_comando = {
+                            "obra_codigo": obra_codigo,
+                            "area": extrair_area_diagnostico_operacional(normalized["conteudo"]),
+                            "data_inicio": None,
+                            "data_fim": None,
+                            "relatorio_semanal_id": None,
+                            "formato": "MARKDOWN",
+                            "limite_itens": 10,
+                            "salvar_exportacao": True,
+                            **AGENTE_008_SEGURANCA_EXPORTACAO,
                         }
                     elif classificacao["tipo_comando"] == "CRIAR_ACAO_OPERACIONAL_OBRA":
                         payload_comando = {
