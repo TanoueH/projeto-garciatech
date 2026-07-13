@@ -325,6 +325,18 @@ class GestaoOperacionalGerarPdfRelatorioSemanalRequest(BaseModel):
     armazenar_minio: bool = True
 
 
+class GestaoOperacionalAprovarPdfRelatorioSemanalRequest(BaseModel):
+    obra_codigo: str
+    pdf_relatorio_id: int = Field(gt=0)
+    decisao: str = Field(pattern="^(APROVAR|REJEITAR|SOLICITAR_AJUSTES)$")
+    motivo: str | None = None
+    observacao: str | None = None
+    decisor_nome: str | None = None
+    decisor_telegram_user_id: str | None = None
+    decisor_telegram_username: str | None = None
+    decisor_chat_id: str | None = None
+
+
 class GestaoOperacionalBriefingDiarioAgendadoRequest(BaseModel):
     forcar: bool = False
 
@@ -537,6 +549,36 @@ def classificar_intencao_executiva(conteudo: Optional[str]) -> dict[str, Any]:
     ]
     texto_comando = re.sub(r"\s+", " ", texto.strip().rstrip("?.!"))
     texto_comando_normalizado = normalizar_texto_comparacao(texto_comando)
+    decisoes_pdf_relatorio = (
+        (
+            "SOLICITAR_AJUSTES",
+            r"(?:solicitar ajustes no pdf|pedir ajustes no pdf|corrigir pdf|ajustar pdf|"
+            r"solicitar revisao do pdf)",
+        ),
+        (
+            "REJEITAR",
+            r"(?:rejeitar pdf|rejeitar relatorio semanal|nao aprovar pdf|recusar pdf)",
+        ),
+        (
+            "APROVAR",
+            r"(?:aprovar pdf(?: do relatorio semanal)?|aprovar relatorio semanal|"
+            r"aprovo o pdf|pode aprovar o pdf)",
+        ),
+    )
+    for decisao, padrao in decisoes_pdf_relatorio:
+        if re.match(rf"^{padrao}(?:\s|$)", texto_comando_normalizado):
+            return {
+                "intencao": "APROVAR_PDF_RELATORIO_SEMANAL_EXECUTIVO_OBRA",
+                "agente_destino": "AGENTE_008_GESTAO_OPERACIONAL_OBRA",
+                "tipo_comando": "APROVAR_PDF_RELATORIO_SEMANAL_EXECUTIVO_OBRA",
+                "decisao": decisao,
+                "requer_aprovacao": False,
+                "confianca": 0.99,
+                "justificativa": (
+                    "Decisão executiva auditável sobre PDF para uso interno, "
+                    "sem envio ou alteração de sistemas externos."
+                ),
+            }
     comandos_diagnostico_operacional = {
         "diagnostico operacional da obra", "situacao operacional da obra",
         "status operacional da obra", "como esta a obra", "risco operacional da obra",
@@ -1158,6 +1200,22 @@ AGENTE_008_SEGURANCA_PDF = {
     "altera_minio": False,
 }
 
+AGENTE_008_SEGURANCA_APROVACAO_PDF = {
+    "modo": "APROVACAO_EXECUTIVA_CONTROLADA",
+    "altera_cronograma": False,
+    "executa_rpa": False,
+    "sincroniza_openproject": False,
+    "altera_rdo_oficial": False,
+    "envia_terceiros": False,
+    "envia_arquivos": False,
+    "gera_links_publicos": False,
+    "altera_minio": False,
+    "gera_pdf": False,
+    "aprova_execucao_automaticamente": False,
+    "aprova_apenas_documento_para_uso_interno": True,
+    "linguagem": "CONSULTIVA",
+}
+
 
 def extrair_alvo_analise_documental(conteudo: Optional[str]) -> dict[str, Any]:
     texto = re.sub(r"\s+", " ", (conteudo or "").strip().rstrip("?.!"))
@@ -1430,6 +1488,49 @@ def normalizar_texto_comparacao(valor: Optional[str]) -> str:
     texto = unicodedata.normalize("NFKD", valor or "")
     texto = "".join(caractere for caractere in texto if not unicodedata.combining(caractere))
     return re.sub(r"[^a-z0-9]+", " ", texto.casefold()).strip()
+
+
+def extrair_decisao_pdf_relatorio_telegram(
+    conteudo: Optional[str], decisao: str,
+) -> dict[str, Any]:
+    texto = re.sub(r"\s+", " ", (conteudo or "").strip())
+    correspondencia_id = re.search(
+        r"#\s*(\d+)\b|\b(?:pdf|relat[oó]rio(?:\s+semanal)?)\s*#?\s*(\d+)\b",
+        texto,
+        flags=re.IGNORECASE,
+    )
+    pdf_relatorio_id = None
+    fim_id = 0
+    if correspondencia_id:
+        pdf_relatorio_id = int(
+            correspondencia_id.group(1) or correspondencia_id.group(2)
+        )
+        fim_id = correspondencia_id.end()
+
+    motivo_match = re.search(
+        r"\bmotivo\s*:\s*(.+?)(?=\s+observa[cç][aã]o\s*:|$)",
+        texto,
+        flags=re.IGNORECASE,
+    )
+    observacao_match = re.search(
+        r"\bobserva[cç][aã]o\s*:\s*(.+?)(?=\s+motivo\s*:|$)",
+        texto,
+        flags=re.IGNORECASE,
+    )
+    texto_extra = texto[fim_id:].strip(" .,:;-\n\t") if fim_id else ""
+    if motivo_match or observacao_match:
+        motivo = motivo_match.group(1).strip() if motivo_match else None
+        observacao = observacao_match.group(1).strip() if observacao_match else None
+    elif decisao == "REJEITAR":
+        motivo, observacao = texto_extra or None, None
+    else:
+        motivo, observacao = None, texto_extra or None
+
+    return {
+        "pdf_relatorio_id": pdf_relatorio_id,
+        "motivo": motivo,
+        "observacao": observacao,
+    }
 
 
 def classificar_documento_tecnico(
@@ -6644,6 +6745,216 @@ def _gerar_pdf_relatorio_semanal_privado(
     return serializar_json_seguro(resultado)
 
 
+def _resposta_telegram_decisao_pdf(
+    obra_codigo: str,
+    pdf_relatorio_id: int,
+    decisao: str,
+    status_resultante: str,
+    decisor: str | None,
+    motivo: str | None,
+    observacao: str | None,
+) -> str:
+    dados = serializar_json_seguro({
+        "obra_codigo": obra_codigo,
+        "pdf_relatorio_id": pdf_relatorio_id,
+        "status_resultante": status_resultante,
+        "decisor": decisor or "Não informado",
+        "motivo": motivo or "Não informado",
+        "observacao": observacao or "Não informada",
+    })
+    governanca = (
+        "Nenhum envio externo, link público, RDO, cronograma, OpenProject, "
+        "MinIO ou RPA foi alterado."
+    )
+    if decisao == "APROVAR":
+        linhas = [
+            f"✅ PDF do relatório semanal aprovado — {dados['obra_codigo']}",
+            "", "PDF:", f"#{dados['pdf_relatorio_id']}",
+            "", "Status:", dados["status_resultante"],
+            "", "Decisor:", dados["decisor"],
+            "", "Governança:",
+            "Aprovação registrada para uso interno.", governanca,
+        ]
+    elif decisao == "REJEITAR":
+        linhas = [
+            f"❌ PDF do relatório semanal rejeitado — {dados['obra_codigo']}",
+            "", "PDF:", f"#{dados['pdf_relatorio_id']}",
+            "", "Status:", dados["status_resultante"],
+            "", "Motivo:", dados["motivo"],
+            "", "Governança:", "Rejeição registrada.", governanca,
+        ]
+    else:
+        linhas = [
+            f"🛠️ Ajustes solicitados no PDF do relatório semanal — {dados['obra_codigo']}",
+            "", "PDF:", f"#{dados['pdf_relatorio_id']}",
+            "", "Status:", dados["status_resultante"],
+            "", "Observação:", dados["observacao"],
+            "", "Governança:", "Solicitação de ajustes registrada.", governanca,
+        ]
+    return "\n".join(str(item) for item in linhas)
+
+
+def _aprovar_pdf_relatorio_semanal_controlado(
+    cur,
+    payload: GestaoOperacionalAprovarPdfRelatorioSemanalRequest,
+) -> dict[str, Any]:
+    decisao = payload.decisao
+    status_por_decisao = {
+        "APROVAR": "APROVADO_PARA_USO_INTERNO",
+        "REJEITAR": "REJEITADO",
+        "SOLICITAR_AJUSTES": "AJUSTES_SOLICITADOS",
+    }
+    status_idempotente = {
+        "APROVAR": "JA_APROVADO",
+        "REJEITAR": "JA_REJEITADO",
+        "SOLICITAR_AJUSTES": "JA_COM_AJUSTES_SOLICITADOS",
+    }
+    status_resultante = status_por_decisao[decisao]
+    cur.execute(
+        """
+        SELECT id, tenant_id, obra_codigo, area, exportacao_relatorio_id,
+               relatorio_semanal_id, status
+        FROM pdfs_relatorios_semanais_obra
+        WHERE id = %(pdf_relatorio_id)s
+        FOR UPDATE;
+        """,
+        {"pdf_relatorio_id": payload.pdf_relatorio_id},
+    )
+    pdf = cur.fetchone()
+    if pdf is None:
+        raise ValueError("PDF_RELATORIO_SEMANAL_NAO_ENCONTRADO")
+    if pdf[2] != payload.obra_codigo:
+        raise ValueError("PDF_RELATORIO_SEMANAL_NAO_PERTENCE_A_OBRA")
+
+    decisor = (
+        payload.decisor_nome
+        or payload.decisor_telegram_username
+        or payload.decisor_telegram_user_id
+    )
+    resposta_telegram = _resposta_telegram_decisao_pdf(
+        payload.obra_codigo,
+        payload.pdf_relatorio_id,
+        decisao,
+        status_resultante,
+        decisor,
+        payload.motivo,
+        payload.observacao,
+    )
+    if pdf[6] == status_resultante:
+        return serializar_json_seguro({
+            "ok": True,
+            "mvp": "0.7K",
+            "status": status_idempotente[decisao],
+            "status_resultante": status_resultante,
+            "decisao": decisao,
+            "pdf_relatorio_id": payload.pdf_relatorio_id,
+            "obra_codigo": payload.obra_codigo,
+            "idempotente": True,
+            "resposta_telegram": resposta_telegram,
+            "flags_seguranca": dict(AGENTE_008_SEGURANCA_APROVACAO_PDF),
+            **AGENTE_008_SEGURANCA_APROVACAO_PDF,
+        })
+
+    metadados = serializar_json_seguro({
+        "mvp": "0.7K",
+        "tipo": "DECISAO_EXECUTIVA_PDF_RELATORIO_SEMANAL",
+        "flags_seguranca": dict(AGENTE_008_SEGURANCA_APROVACAO_PDF),
+    })
+    cur.execute(
+        """
+        INSERT INTO aprovacoes_relatorios_semanais_obra (
+            tenant_id, obra_codigo, area, pdf_relatorio_id,
+            exportacao_relatorio_id, relatorio_semanal_id, decisao,
+            status_resultante, aprovado, rejeitado, ajustes_solicitados,
+            motivo, observacao, decisor_nome, decisor_telegram_user_id,
+            decisor_telegram_username, decisor_chat_id, canal, origem,
+            enviado_para_terceiros, gerou_link_publico, alterou_rdo_oficial,
+            alterou_cronograma, executou_rpa, sincronizou_openproject,
+            alterou_minio, metadados
+        ) VALUES (
+            %(tenant_id)s, %(obra_codigo)s, %(area)s, %(pdf_relatorio_id)s,
+            %(exportacao_relatorio_id)s, %(relatorio_semanal_id)s, %(decisao)s,
+            %(status_resultante)s, %(aprovado)s, %(rejeitado)s,
+            %(ajustes_solicitados)s, %(motivo)s, %(observacao)s,
+            %(decisor_nome)s, %(decisor_telegram_user_id)s,
+            %(decisor_telegram_username)s, %(decisor_chat_id)s, 'telegram',
+            'AGENTE_007_ORQUESTRADOR_EXECUTIVO', false, false, false, false,
+            false, false, false, %(metadados)s
+        )
+        RETURNING id, criado_em;
+        """,
+        {
+            "tenant_id": pdf[1],
+            "obra_codigo": pdf[2],
+            "area": pdf[3],
+            "pdf_relatorio_id": pdf[0],
+            "exportacao_relatorio_id": pdf[4],
+            "relatorio_semanal_id": pdf[5],
+            "decisao": decisao,
+            "status_resultante": status_resultante,
+            "aprovado": decisao == "APROVAR",
+            "rejeitado": decisao == "REJEITAR",
+            "ajustes_solicitados": decisao == "SOLICITAR_AJUSTES",
+            "motivo": payload.motivo,
+            "observacao": payload.observacao,
+            "decisor_nome": payload.decisor_nome,
+            "decisor_telegram_user_id": payload.decisor_telegram_user_id,
+            "decisor_telegram_username": payload.decisor_telegram_username,
+            "decisor_chat_id": payload.decisor_chat_id,
+            "metadados": Json(metadados),
+        },
+    )
+    aprovacao_id, criado_em = cur.fetchone()
+
+    if decisao == "APROVAR":
+        campos_decisao = "aprovado_por = %(decisor)s, aprovado_em = NOW(),"
+    elif decisao == "REJEITAR":
+        campos_decisao = "rejeitado_por = %(decisor)s, rejeitado_em = NOW(),"
+    else:
+        campos_decisao = (
+            "ajustes_solicitados_por = %(decisor)s, "
+            "ajustes_solicitados_em = NOW(),"
+        )
+    cur.execute(
+        f"""
+        UPDATE pdfs_relatorios_semanais_obra
+        SET status = %(status_resultante)s,
+            {campos_decisao}
+            motivo_decisao = %(motivo)s,
+            observacao_decisao = %(observacao)s,
+            atualizado_em = NOW()
+        WHERE id = %(pdf_relatorio_id)s;
+        """,
+        {
+            "pdf_relatorio_id": payload.pdf_relatorio_id,
+            "status_resultante": status_resultante,
+            "decisor": decisor,
+            "motivo": payload.motivo,
+            "observacao": payload.observacao,
+        },
+    )
+
+    return serializar_json_seguro({
+        "ok": True,
+        "mvp": "0.7K",
+        "status": status_resultante,
+        "status_resultante": status_resultante,
+        "decisao": decisao,
+        "aprovacao_id": aprovacao_id,
+        "pdf_relatorio_id": payload.pdf_relatorio_id,
+        "exportacao_relatorio_id": pdf[4],
+        "relatorio_semanal_id": pdf[5],
+        "obra_codigo": payload.obra_codigo,
+        "area": pdf[3],
+        "decisor": decisor,
+        "criado_em": criado_em,
+        "idempotente": False,
+        "resposta_telegram": resposta_telegram,
+        "flags_seguranca": dict(AGENTE_008_SEGURANCA_APROVACAO_PDF),
+        **AGENTE_008_SEGURANCA_APROVACAO_PDF,
+    })
+
+
 @app.post("/agentes/gestao-operacional/relatorio-semanal-executivo")
 def relatorio_semanal_executivo(payload: GestaoOperacionalRelatorioSemanalRequest):
     try:
@@ -6722,6 +7033,31 @@ def gerar_pdf_relatorio_semanal(
     except Exception as exc:
         raise HTTPException(status_code=500, detail={
             "message": "Erro ao gerar PDF privado do relatório semanal executivo.",
+            "error": _texto_curto(exc, 200),
+        })
+
+
+@app.post("/agentes/gestao-operacional/aprovar-pdf-relatorio-semanal")
+def aprovar_pdf_relatorio_semanal(
+    payload: GestaoOperacionalAprovarPdfRelatorioSemanalRequest,
+):
+    try:
+        with get_db_connection() as conn:
+            with conn.cursor() as cur:
+                resultado = _aprovar_pdf_relatorio_semanal_controlado(cur, payload)
+        return serializar_json_seguro(resultado)
+    except ValueError as exc:
+        codigo = str(exc)
+        status_code = (
+            404 if codigo == "PDF_RELATORIO_SEMANAL_NAO_ENCONTRADO" else 422
+        )
+        raise HTTPException(
+            status_code=status_code,
+            detail={"code": codigo, "message": codigo},
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail={
+            "message": "Erro ao registrar decisão executiva sobre o PDF semanal.",
             "error": _texto_curto(exc, 200),
         })
 
@@ -7041,6 +7377,7 @@ def processar_comando_agente_gestao_operacional(
                           'GERAR_RELATORIO_SEMANAL_EXECUTIVO_OBRA',
                           'EXPORTAR_RELATORIO_SEMANAL_EXECUTIVO_OBRA',
                           'GERAR_PDF_RELATORIO_SEMANAL_EXECUTIVO_OBRA',
+                          'APROVAR_PDF_RELATORIO_SEMANAL_EXECUTIVO_OBRA',
                           'CRIAR_ACAO_OPERACIONAL_OBRA',
                           'LISTAR_ACOES_OPERACIONAIS_OBRA',
                           'ATUALIZAR_ACAO_OPERACIONAL_OBRA',
@@ -7060,7 +7397,7 @@ def processar_comando_agente_gestao_operacional(
                     return {
                         "ok": True,
                         "agente": "AGENTE_008_GESTAO_OPERACIONAL_OBRA",
-                        "mvp": "0.7J",
+                        "mvp": "0.7K",
                         "status": "SEM_COMANDO_PENDENTE",
                         "message": (
                             "Nenhum comando PENDENTE para "
@@ -7290,6 +7627,46 @@ def processar_comando_agente_gestao_operacional(
                             "flags_seguranca": dict(AGENTE_008_SEGURANCA_PDF),
                             **AGENTE_008_SEGURANCA_PDF,
                         }
+                elif comando["tipo_comando"] == "APROVAR_PDF_RELATORIO_SEMANAL_EXECUTIVO_OBRA":
+                    payload_aprovacao = {
+                        **(comando["payload_comando"] or {}),
+                        "obra_codigo": comando["obra_codigo"],
+                    }
+                    try:
+                        if payload_aprovacao.get("pdf_relatorio_id") is None:
+                            raise ValueError(
+                                "Informe o ID do PDF. Exemplo: aprovar pdf #5"
+                            )
+                        with conn.transaction():
+                            resultado = _aprovar_pdf_relatorio_semanal_controlado(
+                                cur,
+                                GestaoOperacionalAprovarPdfRelatorioSemanalRequest(
+                                    **payload_aprovacao
+                                ),
+                            )
+                    except Exception as exc:
+                        codigo_erro = str(exc)
+                        resultado = {
+                            "ok": False,
+                            "codigo_erro": codigo_erro,
+                            "erro_controlado": (
+                                "Decisão sobre o PDF semanal não registrada: "
+                                f"{_texto_curto(exc)}"
+                            ),
+                            "resposta_telegram": (
+                                codigo_erro
+                                if codigo_erro.startswith("Informe o ID do PDF.")
+                                else (
+                                    "Não foi possível registrar a decisão sobre o PDF "
+                                    f"semanal. Código: {codigo_erro}. Nenhuma ação "
+                                    "externa foi realizada."
+                                )
+                            ),
+                            "flags_seguranca": dict(
+                                AGENTE_008_SEGURANCA_APROVACAO_PDF
+                            ),
+                            **AGENTE_008_SEGURANCA_APROVACAO_PDF,
+                        }
                 elif comando["tipo_comando"] == "CRIAR_ACAO_OPERACIONAL_OBRA":
                     dados_acao = {
                         **(comando["payload_comando"] or {}),
@@ -7338,6 +7715,7 @@ def processar_comando_agente_gestao_operacional(
                         "GERAR_RELATORIO_SEMANAL_EXECUTIVO_OBRA",
                         "EXPORTAR_RELATORIO_SEMANAL_EXECUTIVO_OBRA",
                         "GERAR_PDF_RELATORIO_SEMANAL_EXECUTIVO_OBRA",
+                        "APROVAR_PDF_RELATORIO_SEMANAL_EXECUTIVO_OBRA",
                     }
                     and resultado.get("ok") is False
                     else "CONCLUIDO"
@@ -7376,6 +7754,8 @@ def processar_comando_agente_gestao_operacional(
                 flags_erro = AGENTE_008_SEGURANCA_EXPORTACAO
             elif comando["tipo_comando"] == "GERAR_PDF_RELATORIO_SEMANAL_EXECUTIVO_OBRA":
                 flags_erro = AGENTE_008_SEGURANCA_PDF
+            elif comando["tipo_comando"] == "APROVAR_PDF_RELATORIO_SEMANAL_EXECUTIVO_OBRA":
+                flags_erro = AGENTE_008_SEGURANCA_APROVACAO_PDF
             else:
                 flags_erro = AGENTE_008_SEGURANCA_CONSULTA
             resultado_erro = {
@@ -7415,7 +7795,7 @@ def processar_comando_agente_gestao_operacional(
     return serializar_json_seguro({
         "ok": True,
         "agente": "AGENTE_008_GESTAO_OPERACIONAL_OBRA",
-        "mvp": "0.7J",
+        "mvp": "0.7K",
         "status_comando": status_resultado,
         "id_comando": str(comando["id_comando"]),
         "tipo_comando": comando["tipo_comando"],
@@ -7631,6 +8011,7 @@ async def receber_entrada_telegram(
         "GERAR_RELATORIO_SEMANAL_EXECUTIVO_OBRA",
         "EXPORTAR_RELATORIO_SEMANAL_EXECUTIVO_OBRA",
         "GERAR_PDF_RELATORIO_SEMANAL_EXECUTIVO_OBRA",
+        "APROVAR_PDF_RELATORIO_SEMANAL_EXECUTIVO_OBRA",
         "CRIAR_ACAO_OPERACIONAL_OBRA",
         "LISTAR_ACOES_OPERACIONAIS_OBRA",
         "ATUALIZAR_ACAO_OPERACIONAL_OBRA",
@@ -8230,6 +8611,20 @@ async def receber_entrada_telegram(
                             "salvar_pdf": True,
                             "armazenar_minio": True,
                             **AGENTE_008_SEGURANCA_PDF,
+                        }
+                    elif classificacao["tipo_comando"] == "APROVAR_PDF_RELATORIO_SEMANAL_EXECUTIVO_OBRA":
+                        dados_decisao = extrair_decisao_pdf_relatorio_telegram(
+                            normalized["conteudo"], classificacao["decisao"],
+                        )
+                        payload_comando = {
+                            "obra_codigo": obra_codigo,
+                            **dados_decisao,
+                            "decisao": classificacao["decisao"],
+                            "decisor_nome": None,
+                            "decisor_telegram_user_id": normalized["telegram_user_id"],
+                            "decisor_telegram_username": normalized["telegram_username"],
+                            "decisor_chat_id": normalized["chat_id"],
+                            **AGENTE_008_SEGURANCA_APROVACAO_PDF,
                         }
                     elif classificacao["tipo_comando"] == "CRIAR_ACAO_OPERACIONAL_OBRA":
                         payload_comando = {
