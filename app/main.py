@@ -337,6 +337,20 @@ class GestaoOperacionalAprovarPdfRelatorioSemanalRequest(BaseModel):
     decisor_chat_id: str | None = None
 
 
+class GestaoOperacionalSolicitarEnvioRelatorioSemanalRequest(BaseModel):
+    obra_codigo: str
+    pdf_relatorio_id: int = Field(gt=0)
+    canal_pretendido: str
+    destinatario_nome: str | None = None
+    destinatario_contato: str | None = None
+    assunto: str | None = None
+    mensagem: str | None = None
+    solicitado_por: str | None = None
+    solicitante_telegram_user_id: str | None = None
+    solicitante_telegram_username: str | None = None
+    solicitante_chat_id: str | None = None
+
+
 class GestaoOperacionalBriefingDiarioAgendadoRequest(BaseModel):
     forcar: bool = False
 
@@ -579,6 +593,22 @@ def classificar_intencao_executiva(conteudo: Optional[str]) -> dict[str, Any]:
                     "sem envio ou alteração de sistemas externos."
                 ),
             }
+    if re.match(
+        r"^(?:solicitar envio do|pedir envio do|preparar envio do|registrar envio do|"
+        r"enviar|encaminhar) (?:pdf|relatorio)(?:\s|$)",
+        texto_comando_normalizado,
+    ):
+        return {
+            "intencao": "SOLICITAR_ENVIO_RELATORIO_SEMANAL_EXECUTIVO_OBRA",
+            "agente_destino": "AGENTE_008_GESTAO_OPERACIONAL_OBRA",
+            "tipo_comando": "SOLICITAR_ENVIO_RELATORIO_SEMANAL_EXECUTIVO_OBRA",
+            "requer_aprovacao": False,
+            "confianca": 0.99,
+            "justificativa": (
+                "Registro controlado de solicitação de envio futuro, sem envio, "
+                "arquivo, link ou execução externa."
+            ),
+        }
     comandos_diagnostico_operacional = {
         "diagnostico operacional da obra", "situacao operacional da obra",
         "status operacional da obra", "como esta a obra", "risco operacional da obra",
@@ -1216,6 +1246,25 @@ AGENTE_008_SEGURANCA_APROVACAO_PDF = {
     "linguagem": "CONSULTIVA",
 }
 
+AGENTE_008_SEGURANCA_SOLICITACAO_ENVIO = {
+    "modo": "SOLICITACAO_ENVIO_CONTROLADA",
+    "altera_cronograma": False,
+    "executa_rpa": False,
+    "sincroniza_openproject": False,
+    "altera_rdo_oficial": False,
+    "envia_terceiros": False,
+    "envio_executado": False,
+    "envia_arquivos": False,
+    "anexou_arquivo": False,
+    "gera_links_publicos": False,
+    "gerou_presigned_url": False,
+    "altera_minio": False,
+    "gera_pdf": False,
+    "aprova_execucao_automaticamente": False,
+    "apenas_registra_solicitacao": True,
+    "linguagem": "CONSULTIVA",
+}
+
 
 def extrair_alvo_analise_documental(conteudo: Optional[str]) -> dict[str, Any]:
     texto = re.sub(r"\s+", " ", (conteudo or "").strip().rstrip("?.!"))
@@ -1530,6 +1579,50 @@ def extrair_decisao_pdf_relatorio_telegram(
         "pdf_relatorio_id": pdf_relatorio_id,
         "motivo": motivo,
         "observacao": observacao,
+    }
+
+
+def extrair_solicitacao_envio_relatorio_telegram(
+    conteudo: Optional[str],
+) -> dict[str, Any]:
+    texto = re.sub(r"\s+", " ", (conteudo or "").strip())
+    correspondencia_id = re.search(
+        r"#\s*(\d+)\b|\b(?:pdf|relat[oó]rio)\s*#?\s*(\d+)\b",
+        texto,
+        flags=re.IGNORECASE,
+    )
+    pdf_relatorio_id = None
+    if correspondencia_id:
+        pdf_relatorio_id = int(
+            correspondencia_id.group(1) or correspondencia_id.group(2)
+        )
+
+    texto_normalizado = normalizar_texto_comparacao(texto)
+    if re.search(r"\be mail\b|\bemail\b", texto_normalizado):
+        canal = "EMAIL"
+    elif re.search(r"\bwhatsapp\b|\bzap\b", texto_normalizado):
+        canal = "WHATSAPP"
+    elif re.search(r"\btelegram\b", texto_normalizado):
+        canal = "TELEGRAM"
+    else:
+        canal = "INTERNO"
+
+    destinatario_match = re.search(
+        r"\bpara\s+(.+?)(?=\s+(?:por\s+(?:e-?mail|email|whatsapp|zap)|"
+        r"no\s+telegram)\b|$)",
+        texto,
+        flags=re.IGNORECASE,
+    )
+    destinatario_nome = None
+    if destinatario_match:
+        destinatario_nome = destinatario_match.group(1).strip(" .,:;-\n\t") or None
+
+    return {
+        "pdf_relatorio_id": pdf_relatorio_id,
+        "canal_pretendido": canal,
+        "destinatario_nome": destinatario_nome,
+        "destinatario_contato": None,
+        "mensagem": None,
     }
 
 
@@ -6955,6 +7048,198 @@ def _aprovar_pdf_relatorio_semanal_controlado(
     })
 
 
+def _resposta_telegram_solicitacao_envio(
+    obra_codigo: str,
+    pdf_relatorio_id: int,
+    solicitacao_envio_id: int,
+    canal_pretendido: str,
+    destinatario_nome: str | None,
+    status: str,
+) -> str:
+    dados = serializar_json_seguro({
+        "obra_codigo": obra_codigo,
+        "pdf_relatorio_id": pdf_relatorio_id,
+        "solicitacao_envio_id": solicitacao_envio_id,
+        "canal_pretendido": canal_pretendido,
+        "destinatario_nome": destinatario_nome or "Não informado",
+        "status": status,
+    })
+    linhas = [
+        f"📨 Solicitação de envio registrada — {dados['obra_codigo']}",
+        "", "PDF:", f"#{dados['pdf_relatorio_id']}",
+        "", "Solicitação:", f"#{dados['solicitacao_envio_id']}",
+        "", "Canal pretendido:", dados["canal_pretendido"],
+        "", "Destinatário:", dados["destinatario_nome"],
+        "", "Status:", dados["status"],
+        "", "Governança:",
+        "A solicitação foi registrada, mas nenhum envio foi executado.",
+        "Nenhum arquivo foi anexado.",
+        "Nenhum link público ou presigned URL foi criado.",
+        "Nenhum RDO, cronograma, MinIO, OpenProject ou RPA foi alterado.",
+    ]
+    return "\n".join(str(item) for item in linhas)
+
+
+def _solicitar_envio_relatorio_semanal_controlado(
+    cur,
+    payload: GestaoOperacionalSolicitarEnvioRelatorioSemanalRequest,
+) -> dict[str, Any]:
+    canal_pretendido = payload.canal_pretendido.strip().upper()
+    if canal_pretendido not in {"EMAIL", "WHATSAPP", "TELEGRAM", "INTERNO"}:
+        raise ValueError("CANAL_NAO_SUPORTADO")
+
+    cur.execute(
+        """
+        SELECT id, tenant_id, obra_codigo, area, status
+        FROM pdfs_relatorios_semanais_obra
+        WHERE id = %(pdf_relatorio_id)s
+        FOR SHARE;
+        """,
+        {"pdf_relatorio_id": payload.pdf_relatorio_id},
+    )
+    pdf = cur.fetchone()
+    if pdf is None:
+        raise ValueError("PDF_RELATORIO_NAO_ENCONTRADO")
+    if pdf[2] != payload.obra_codigo:
+        raise ValueError("PDF_RELATORIO_NAO_PERTENCE_A_OBRA")
+    if pdf[4] != "APROVADO_PARA_USO_INTERNO":
+        raise ValueError("PDF_RELATORIO_NAO_APROVADO")
+
+    cur.execute(
+        """
+        SELECT id
+        FROM aprovacoes_relatorios_semanais_obra
+        WHERE pdf_relatorio_id = %(pdf_relatorio_id)s
+          AND status_resultante = 'APROVADO_PARA_USO_INTERNO'
+        ORDER BY criado_em DESC, id DESC
+        LIMIT 1;
+        """,
+        {"pdf_relatorio_id": payload.pdf_relatorio_id},
+    )
+    aprovacao = cur.fetchone()
+    aprovacao_relatorio_id = aprovacao[0] if aprovacao else None
+    status = "SOLICITADO_AGUARDANDO_EXECUCAO_CONTROLADA"
+
+    cur.execute(
+        """
+        SELECT id, criado_em
+        FROM solicitacoes_envio_relatorios_semanais_obra
+        WHERE pdf_relatorio_id = %(pdf_relatorio_id)s
+          AND canal_pretendido = %(canal_pretendido)s
+          AND destinatario_nome IS NOT DISTINCT FROM %(destinatario_nome)s
+          AND destinatario_contato IS NOT DISTINCT FROM %(destinatario_contato)s
+          AND status = %(status)s
+          AND criado_em >= NOW() - INTERVAL '24 hours'
+        ORDER BY criado_em DESC, id DESC
+        LIMIT 1;
+        """,
+        {
+            "pdf_relatorio_id": payload.pdf_relatorio_id,
+            "canal_pretendido": canal_pretendido,
+            "destinatario_nome": payload.destinatario_nome,
+            "destinatario_contato": payload.destinatario_contato,
+            "status": status,
+        },
+    )
+    existente = cur.fetchone()
+    if existente:
+        solicitacao_id, criado_em = existente
+        status_retorno = "JA_SOLICITADO_RECENTEMENTE"
+        return serializar_json_seguro({
+            "ok": True,
+            "mvp": "0.7L",
+            "status": status_retorno,
+            "status_solicitacao": status,
+            "solicitacao_envio_id": solicitacao_id,
+            "pdf_relatorio_id": payload.pdf_relatorio_id,
+            "aprovacao_relatorio_id": aprovacao_relatorio_id,
+            "obra_codigo": payload.obra_codigo,
+            "canal_pretendido": canal_pretendido,
+            "destinatario_nome": payload.destinatario_nome,
+            "pdf_aprovado": True,
+            "criado_em": criado_em,
+            "idempotente": True,
+            "resposta_telegram": _resposta_telegram_solicitacao_envio(
+                payload.obra_codigo, payload.pdf_relatorio_id, solicitacao_id,
+                canal_pretendido, payload.destinatario_nome, status_retorno,
+            ),
+            "flags_seguranca": dict(AGENTE_008_SEGURANCA_SOLICITACAO_ENVIO),
+            **AGENTE_008_SEGURANCA_SOLICITACAO_ENVIO,
+        })
+
+    metadados = serializar_json_seguro({
+        "mvp": "0.7L",
+        "tipo": "SOLICITACAO_ENVIO_CONTROLADA_RELATORIO_SEMANAL",
+        "flags_seguranca": dict(AGENTE_008_SEGURANCA_SOLICITACAO_ENVIO),
+    })
+    cur.execute(
+        """
+        INSERT INTO solicitacoes_envio_relatorios_semanais_obra (
+            tenant_id, obra_codigo, area, pdf_relatorio_id,
+            aprovacao_relatorio_id, canal_pretendido, destinatario_nome,
+            destinatario_contato, assunto, mensagem, status, solicitado_por,
+            solicitante_telegram_user_id, solicitante_telegram_username,
+            solicitante_chat_id, canal_origem, validacao_pdf_status,
+            pdf_aprovado, envio_executado, enviado_para_terceiros,
+            gerou_link_publico, gerou_presigned_url, anexou_arquivo,
+            alterou_rdo_oficial, alterou_cronograma, executou_rpa,
+            sincronizou_openproject, alterou_minio, metadados
+        ) VALUES (
+            %(tenant_id)s, %(obra_codigo)s, %(area)s, %(pdf_relatorio_id)s,
+            %(aprovacao_relatorio_id)s, %(canal_pretendido)s,
+            %(destinatario_nome)s, %(destinatario_contato)s, %(assunto)s,
+            %(mensagem)s, %(status)s, %(solicitado_por)s,
+            %(solicitante_telegram_user_id)s,
+            %(solicitante_telegram_username)s, %(solicitante_chat_id)s,
+            'telegram', %(validacao_pdf_status)s, true, false, false, false,
+            false, false, false, false, false, false, false, %(metadados)s
+        )
+        RETURNING id, criado_em;
+        """,
+        {
+            "tenant_id": pdf[1],
+            "obra_codigo": pdf[2],
+            "area": pdf[3],
+            "pdf_relatorio_id": pdf[0],
+            "aprovacao_relatorio_id": aprovacao_relatorio_id,
+            "canal_pretendido": canal_pretendido,
+            "destinatario_nome": payload.destinatario_nome,
+            "destinatario_contato": payload.destinatario_contato,
+            "assunto": payload.assunto,
+            "mensagem": payload.mensagem,
+            "status": status,
+            "solicitado_por": payload.solicitado_por,
+            "solicitante_telegram_user_id": payload.solicitante_telegram_user_id,
+            "solicitante_telegram_username": payload.solicitante_telegram_username,
+            "solicitante_chat_id": payload.solicitante_chat_id,
+            "validacao_pdf_status": pdf[4],
+            "metadados": Json(metadados),
+        },
+    )
+    solicitacao_id, criado_em = cur.fetchone()
+    return serializar_json_seguro({
+        "ok": True,
+        "mvp": "0.7L",
+        "status": status,
+        "solicitacao_envio_id": solicitacao_id,
+        "pdf_relatorio_id": payload.pdf_relatorio_id,
+        "aprovacao_relatorio_id": aprovacao_relatorio_id,
+        "obra_codigo": payload.obra_codigo,
+        "area": pdf[3],
+        "canal_pretendido": canal_pretendido,
+        "destinatario_nome": payload.destinatario_nome,
+        "pdf_aprovado": True,
+        "criado_em": criado_em,
+        "idempotente": False,
+        "resposta_telegram": _resposta_telegram_solicitacao_envio(
+            payload.obra_codigo, payload.pdf_relatorio_id, solicitacao_id,
+            canal_pretendido, payload.destinatario_nome, status,
+        ),
+        "flags_seguranca": dict(AGENTE_008_SEGURANCA_SOLICITACAO_ENVIO),
+        **AGENTE_008_SEGURANCA_SOLICITACAO_ENVIO,
+    })
+
+
 @app.post("/agentes/gestao-operacional/relatorio-semanal-executivo")
 def relatorio_semanal_executivo(payload: GestaoOperacionalRelatorioSemanalRequest):
     try:
@@ -7058,6 +7343,29 @@ def aprovar_pdf_relatorio_semanal(
     except Exception as exc:
         raise HTTPException(status_code=500, detail={
             "message": "Erro ao registrar decisão executiva sobre o PDF semanal.",
+            "error": _texto_curto(exc, 200),
+        })
+
+
+@app.post("/agentes/gestao-operacional/solicitar-envio-relatorio-semanal")
+def solicitar_envio_relatorio_semanal(
+    payload: GestaoOperacionalSolicitarEnvioRelatorioSemanalRequest,
+):
+    try:
+        with get_db_connection() as conn:
+            with conn.cursor() as cur:
+                resultado = _solicitar_envio_relatorio_semanal_controlado(cur, payload)
+        return serializar_json_seguro(resultado)
+    except ValueError as exc:
+        codigo = str(exc)
+        status_code = 404 if codigo == "PDF_RELATORIO_NAO_ENCONTRADO" else 422
+        raise HTTPException(
+            status_code=status_code,
+            detail={"code": codigo, "message": codigo},
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail={
+            "message": "Erro ao registrar solicitação controlada de envio.",
             "error": _texto_curto(exc, 200),
         })
 
@@ -7378,6 +7686,7 @@ def processar_comando_agente_gestao_operacional(
                           'EXPORTAR_RELATORIO_SEMANAL_EXECUTIVO_OBRA',
                           'GERAR_PDF_RELATORIO_SEMANAL_EXECUTIVO_OBRA',
                           'APROVAR_PDF_RELATORIO_SEMANAL_EXECUTIVO_OBRA',
+                          'SOLICITAR_ENVIO_RELATORIO_SEMANAL_EXECUTIVO_OBRA',
                           'CRIAR_ACAO_OPERACIONAL_OBRA',
                           'LISTAR_ACOES_OPERACIONAIS_OBRA',
                           'ATUALIZAR_ACAO_OPERACIONAL_OBRA',
@@ -7667,6 +7976,46 @@ def processar_comando_agente_gestao_operacional(
                             ),
                             **AGENTE_008_SEGURANCA_APROVACAO_PDF,
                         }
+                elif comando["tipo_comando"] == "SOLICITAR_ENVIO_RELATORIO_SEMANAL_EXECUTIVO_OBRA":
+                    payload_solicitacao = {
+                        **(comando["payload_comando"] or {}),
+                        "obra_codigo": comando["obra_codigo"],
+                    }
+                    try:
+                        if payload_solicitacao.get("pdf_relatorio_id") is None:
+                            raise ValueError(
+                                "Informe o ID do PDF. Exemplo: solicitar envio do pdf "
+                                "#5 para Sr. Charles por email"
+                            )
+                        with conn.transaction():
+                            resultado = _solicitar_envio_relatorio_semanal_controlado(
+                                cur,
+                                GestaoOperacionalSolicitarEnvioRelatorioSemanalRequest(
+                                    **payload_solicitacao
+                                ),
+                            )
+                    except Exception as exc:
+                        codigo_erro = str(exc)
+                        resultado = {
+                            "ok": False,
+                            "codigo_erro": codigo_erro,
+                            "erro_controlado": (
+                                "Solicitação controlada de envio não registrada: "
+                                f"{_texto_curto(exc)}"
+                            ),
+                            "resposta_telegram": (
+                                codigo_erro
+                                if codigo_erro.startswith("Informe o ID do PDF.")
+                                else (
+                                    "Não foi possível registrar a solicitação de envio. "
+                                    f"Código: {codigo_erro}. Nenhum envio foi executado."
+                                )
+                            ),
+                            "flags_seguranca": dict(
+                                AGENTE_008_SEGURANCA_SOLICITACAO_ENVIO
+                            ),
+                            **AGENTE_008_SEGURANCA_SOLICITACAO_ENVIO,
+                        }
                 elif comando["tipo_comando"] == "CRIAR_ACAO_OPERACIONAL_OBRA":
                     dados_acao = {
                         **(comando["payload_comando"] or {}),
@@ -7716,6 +8065,7 @@ def processar_comando_agente_gestao_operacional(
                         "EXPORTAR_RELATORIO_SEMANAL_EXECUTIVO_OBRA",
                         "GERAR_PDF_RELATORIO_SEMANAL_EXECUTIVO_OBRA",
                         "APROVAR_PDF_RELATORIO_SEMANAL_EXECUTIVO_OBRA",
+                        "SOLICITAR_ENVIO_RELATORIO_SEMANAL_EXECUTIVO_OBRA",
                     }
                     and resultado.get("ok") is False
                     else "CONCLUIDO"
@@ -7756,6 +8106,8 @@ def processar_comando_agente_gestao_operacional(
                 flags_erro = AGENTE_008_SEGURANCA_PDF
             elif comando["tipo_comando"] == "APROVAR_PDF_RELATORIO_SEMANAL_EXECUTIVO_OBRA":
                 flags_erro = AGENTE_008_SEGURANCA_APROVACAO_PDF
+            elif comando["tipo_comando"] == "SOLICITAR_ENVIO_RELATORIO_SEMANAL_EXECUTIVO_OBRA":
+                flags_erro = AGENTE_008_SEGURANCA_SOLICITACAO_ENVIO
             else:
                 flags_erro = AGENTE_008_SEGURANCA_CONSULTA
             resultado_erro = {
@@ -7795,7 +8147,12 @@ def processar_comando_agente_gestao_operacional(
     return serializar_json_seguro({
         "ok": True,
         "agente": "AGENTE_008_GESTAO_OPERACIONAL_OBRA",
-        "mvp": "0.7K",
+        "mvp": (
+            "0.7L"
+            if comando["tipo_comando"]
+            == "SOLICITAR_ENVIO_RELATORIO_SEMANAL_EXECUTIVO_OBRA"
+            else "0.7K"
+        ),
         "status_comando": status_resultado,
         "id_comando": str(comando["id_comando"]),
         "tipo_comando": comando["tipo_comando"],
@@ -8012,6 +8369,7 @@ async def receber_entrada_telegram(
         "EXPORTAR_RELATORIO_SEMANAL_EXECUTIVO_OBRA",
         "GERAR_PDF_RELATORIO_SEMANAL_EXECUTIVO_OBRA",
         "APROVAR_PDF_RELATORIO_SEMANAL_EXECUTIVO_OBRA",
+        "SOLICITAR_ENVIO_RELATORIO_SEMANAL_EXECUTIVO_OBRA",
         "CRIAR_ACAO_OPERACIONAL_OBRA",
         "LISTAR_ACOES_OPERACIONAIS_OBRA",
         "ATUALIZAR_ACAO_OPERACIONAL_OBRA",
@@ -8625,6 +8983,22 @@ async def receber_entrada_telegram(
                             "decisor_telegram_username": normalized["telegram_username"],
                             "decisor_chat_id": normalized["chat_id"],
                             **AGENTE_008_SEGURANCA_APROVACAO_PDF,
+                        }
+                    elif classificacao["tipo_comando"] == "SOLICITAR_ENVIO_RELATORIO_SEMANAL_EXECUTIVO_OBRA":
+                        dados_solicitacao = extrair_solicitacao_envio_relatorio_telegram(
+                            normalized["conteudo"]
+                        )
+                        payload_comando = {
+                            "obra_codigo": obra_codigo,
+                            **dados_solicitacao,
+                            "assunto": (
+                                f"Relatório semanal executivo — {obra_codigo}"
+                            ),
+                            "solicitado_por": None,
+                            "solicitante_telegram_user_id": normalized["telegram_user_id"],
+                            "solicitante_telegram_username": normalized["telegram_username"],
+                            "solicitante_chat_id": normalized["chat_id"],
+                            **AGENTE_008_SEGURANCA_SOLICITACAO_ENVIO,
                         }
                     elif classificacao["tipo_comando"] == "CRIAR_ACAO_OPERACIONAL_OBRA":
                         payload_comando = {
