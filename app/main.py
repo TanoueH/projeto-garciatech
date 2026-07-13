@@ -313,6 +313,18 @@ class GestaoOperacionalExportarRelatorioSemanalRequest(BaseModel):
     salvar_exportacao: bool = True
 
 
+class GestaoOperacionalGerarPdfRelatorioSemanalRequest(BaseModel):
+    obra_codigo: str
+    area: str | None = None
+    data_inicio: date | None = None
+    data_fim: date | None = None
+    exportacao_relatorio_id: int | None = Field(default=None, gt=0)
+    relatorio_semanal_id: int | None = Field(default=None, gt=0)
+    limite_itens: int = Field(default=10, ge=1, le=50)
+    salvar_pdf: bool = True
+    armazenar_minio: bool = True
+
+
 class GestaoOperacionalBriefingDiarioAgendadoRequest(BaseModel):
     forcar: bool = False
 
@@ -568,6 +580,24 @@ def classificar_intencao_executiva(conteudo: Optional[str]) -> dict[str, Any]:
         "exportar relatorio semanal do refeitorio",
         "preparar relatorio semanal do refeitorio",
     }
+    comandos_pdf_relatorio_semanal = {
+        "gerar pdf do relatorio semanal",
+        "pdf do relatorio semanal da obra",
+        "preparar pdf do relatorio semanal",
+        "gerar pdf do relatorio semanal do refeitorio",
+        "preparar pdf para revisao",
+    }
+    if texto_comando_normalizado in comandos_pdf_relatorio_semanal:
+        return {
+            "intencao": "GERAR_PDF_RELATORIO_SEMANAL_EXECUTIVO_OBRA",
+            "agente_destino": "AGENTE_008_GESTAO_OPERACIONAL_OBRA",
+            "tipo_comando": "GERAR_PDF_RELATORIO_SEMANAL_EXECUTIVO_OBRA",
+            "requer_aprovacao": False,
+            "confianca": 0.99,
+            "justificativa": (
+                "Geração de PDF privado para revisão interna, sem envio ou execução externa."
+            ),
+        }
     if texto_comando_normalizado in comandos_exportar_relatorio_semanal:
         return {
             "intencao": "EXPORTAR_RELATORIO_SEMANAL_EXECUTIVO_OBRA",
@@ -1120,6 +1150,12 @@ AGENTE_008_SEGURANCA_EXPORTACAO = {
     **AGENTE_008_SEGURANCA_CONSULTA,
     "formato": "MARKDOWN",
     "gera_pdf": False,
+}
+
+AGENTE_008_SEGURANCA_PDF = {
+    **AGENTE_008_SEGURANCA_CONSULTA,
+    "formato": "PDF",
+    "altera_minio": False,
 }
 
 
@@ -5718,6 +5754,7 @@ def _gerar_relatorio_semanal_executivo(
         and item.get("tipo_comando") not in {
             "GERAR_RELATORIO_SEMANAL_EXECUTIVO_OBRA",
             "EXPORTAR_RELATORIO_SEMANAL_EXECUTIVO_OBRA",
+            "GERAR_PDF_RELATORIO_SEMANAL_EXECUTIVO_OBRA",
         }
     ]
 
@@ -6189,6 +6226,424 @@ def _exportar_relatorio_semanal_controlado(
     return serializar_json_seguro(resultado)
 
 
+def _carregar_ou_criar_exportacao_para_pdf(
+    cur,
+    payload: GestaoOperacionalGerarPdfRelatorioSemanalRequest,
+) -> dict[str, Any]:
+    if payload.exportacao_relatorio_id is None:
+        exportacao = _exportar_relatorio_semanal_controlado(
+            cur,
+            GestaoOperacionalExportarRelatorioSemanalRequest(
+                obra_codigo=payload.obra_codigo,
+                area=payload.area,
+                data_inicio=payload.data_inicio,
+                data_fim=payload.data_fim,
+                relatorio_semanal_id=payload.relatorio_semanal_id,
+                formato="MARKDOWN",
+                limite_itens=payload.limite_itens,
+                salvar_exportacao=True,
+            ),
+        )
+        return {
+            "id": exportacao["exportacao_id"],
+            "obra_codigo": exportacao["obra_codigo"],
+            "area": exportacao.get("area"),
+            "relatorio_semanal_id": exportacao.get("relatorio_semanal_id"),
+            "data_inicio": _data_operacional(exportacao.get("data_inicio")),
+            "data_fim": _data_operacional(exportacao.get("data_fim")),
+            "titulo": exportacao["titulo"],
+            "conteudo_markdown": exportacao["conteudo_markdown"],
+            "exportacao_criada": True,
+        }
+
+    cur.execute(
+        """
+        SELECT id, obra_codigo, area, relatorio_semanal_id, data_inicio, data_fim,
+               titulo, conteudo_markdown
+        FROM exportacoes_relatorios_semanais_obra
+        WHERE id = %(id)s;
+        """,
+        {"id": payload.exportacao_relatorio_id},
+    )
+    row = cur.fetchone()
+    if row is None:
+        raise ValueError("EXPORTACAO_RELATORIO_NAO_ENCONTRADA")
+    if row[1] != payload.obra_codigo:
+        raise ValueError("EXPORTACAO_RELATORIO_NAO_PERTENCE_A_OBRA")
+    if not str(row[7] or "").strip():
+        raise ValueError("CONTEUDO_MARKDOWN_EXPORTACAO_INVALIDO")
+    return {
+        "id": row[0],
+        "obra_codigo": row[1],
+        "area": row[2],
+        "relatorio_semanal_id": row[3],
+        "data_inicio": row[4],
+        "data_fim": row[5],
+        "titulo": row[6],
+        "conteudo_markdown": row[7],
+        "exportacao_criada": False,
+    }
+
+
+def _texto_pdf_markdown(valor: Any) -> str:
+    texto = str(valor or "").strip()
+    texto = re.sub(r"\*\*(.*?)\*\*", r"\1", texto)
+    texto = re.sub(r"`(.*?)`", r"\1", texto)
+    return html.escape(texto)
+
+
+def _gerar_bytes_pdf_relatorio_semanal(exportacao: dict[str, Any]) -> bytes:
+    try:
+        from reportlab.lib import colors
+        from reportlab.lib.enums import TA_CENTER, TA_LEFT
+        from reportlab.lib.pagesizes import A4, portrait
+        from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
+        from reportlab.lib.units import cm
+        from reportlab.platypus import (
+            KeepTogether,
+            Paragraph,
+            SimpleDocTemplate,
+            Spacer,
+            Table,
+            TableStyle,
+        )
+    except ImportError as exc:
+        raise RuntimeError(
+            "Biblioteca reportlab não instalada. Instale requirements-api.txt."
+        ) from exc
+
+    conteudo_markdown = str(exportacao["conteudo_markdown"])
+    status_match = re.search(
+        r"\*\*Status executivo:\*\*\s*([^\n]+)", conteudo_markdown, re.IGNORECASE,
+    )
+    status_executivo = (
+        status_match.group(1).strip().rstrip("  ") if status_match else "NÃO INFORMADO"
+    )
+    area = exportacao.get("area")
+    area_exibicao = str(area).replace("_", " ").title() if area else "Todas"
+
+    buffer = BytesIO()
+    documento = SimpleDocTemplate(
+        buffer,
+        pagesize=portrait(A4),
+        rightMargin=1.7 * cm,
+        leftMargin=1.7 * cm,
+        topMargin=1.5 * cm,
+        bottomMargin=2.1 * cm,
+        title=str(exportacao["titulo"]),
+        author="AGENTE_008_GESTAO_OPERACIONAL_OBRA",
+    )
+    estilos_base = getSampleStyleSheet()
+    azul = colors.HexColor("#174A5B")
+    cinza = colors.HexColor("#4B5563")
+    estilos = {
+        "titulo": ParagraphStyle(
+            "PdfTitulo", parent=estilos_base["Title"], fontName="Helvetica-Bold",
+            fontSize=20, leading=24, textColor=azul, alignment=TA_CENTER,
+            spaceAfter=12,
+        ),
+        "capa": ParagraphStyle(
+            "PdfCapa", parent=estilos_base["BodyText"], fontName="Helvetica",
+            fontSize=10, leading=15, textColor=cinza, alignment=TA_LEFT,
+        ),
+        "secao": ParagraphStyle(
+            "PdfSecao", parent=estilos_base["Heading2"], fontName="Helvetica-Bold",
+            fontSize=12, leading=15, textColor=azul, spaceBefore=10, spaceAfter=6,
+            keepWithNext=True,
+        ),
+        "corpo": ParagraphStyle(
+            "PdfCorpo", parent=estilos_base["BodyText"], fontName="Helvetica",
+            fontSize=9, leading=13, textColor=colors.HexColor("#222222"),
+            spaceAfter=4,
+        ),
+        "item": ParagraphStyle(
+            "PdfItem", parent=estilos_base["BodyText"], fontName="Helvetica",
+            fontSize=9, leading=13, leftIndent=12, firstLineIndent=-7, spaceAfter=3,
+        ),
+    }
+
+    elementos: list[Any] = [
+        Paragraph("Relatório Semanal Executivo", estilos["titulo"]),
+        Table(
+            [[Paragraph(
+                "<b>Obra:</b> " + _texto_pdf_markdown(exportacao["obra_codigo"]) + "<br/>"
+                "<b>Área:</b> " + _texto_pdf_markdown(area_exibicao) + "<br/>"
+                "<b>Período:</b> " + _texto_pdf_markdown(_formatar_data_br(exportacao["data_inicio"]))
+                + " a " + _texto_pdf_markdown(_formatar_data_br(exportacao["data_fim"])) + "<br/>"
+                "<b>Status executivo:</b> " + _texto_pdf_markdown(status_executivo) + "<br/>"
+                "<b>Gerado por:</b> AGENTE_008_GESTAO_OPERACIONAL_OBRA<br/>"
+                "<b>Modo:</b> CONSULTA",
+                estilos["capa"],
+            )]],
+            colWidths=[16.2 * cm],
+            style=TableStyle([
+                ("BACKGROUND", (0, 0), (-1, -1), colors.HexColor("#F2F6F7")),
+                ("BOX", (0, 0), (-1, -1), 0.7, azul),
+                ("LEFTPADDING", (0, 0), (-1, -1), 12),
+                ("RIGHTPADDING", (0, 0), (-1, -1), 12),
+                ("TOPPADDING", (0, 0), (-1, -1), 10),
+                ("BOTTOMPADDING", (0, 0), (-1, -1), 10),
+            ]),
+        ),
+        Spacer(1, 10),
+    ]
+
+    linhas = conteudo_markdown.splitlines()
+    indice = 0
+    encontrou_secao = False
+    while indice < len(linhas):
+        linha = linhas[indice].strip()
+        if linha.startswith("## "):
+            encontrou_secao = True
+            elementos.append(Paragraph(_texto_pdf_markdown(linha[3:]), estilos["secao"]))
+            indice += 1
+            continue
+        if not encontrou_secao or not linha or linha == "---":
+            indice += 1
+            continue
+        if linha.startswith("|"):
+            tabela_markdown: list[list[str]] = []
+            while indice < len(linhas) and linhas[indice].strip().startswith("|"):
+                celulas = [
+                    item.replace(r"\|", "|").strip()
+                    for item in re.split(
+                        r"(?<!\\)\|", linhas[indice].strip().strip("|")
+                    )
+                ]
+                if not all(re.fullmatch(r":?-{3,}:?", item) for item in celulas):
+                    tabela_markdown.append(celulas)
+                indice += 1
+            if tabela_markdown:
+                tabela_pdf = [
+                    [Paragraph(_texto_pdf_markdown(celula), estilos["corpo"]) for celula in linha_tabela]
+                    for linha_tabela in tabela_markdown
+                ]
+                tabela = Table(tabela_pdf, colWidths=[12.5 * cm, 3.7 * cm], repeatRows=1)
+                tabela.setStyle(TableStyle([
+                    ("BACKGROUND", (0, 0), (-1, 0), azul),
+                    ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
+                    ("GRID", (0, 0), (-1, -1), 0.35, colors.HexColor("#CBD5E1")),
+                    ("BACKGROUND", (0, 1), (-1, -1), colors.HexColor("#F8FAFC")),
+                    ("VALIGN", (0, 0), (-1, -1), "TOP"),
+                    ("LEFTPADDING", (0, 0), (-1, -1), 6),
+                    ("RIGHTPADDING", (0, 0), (-1, -1), 6),
+                    ("TOPPADDING", (0, 0), (-1, -1), 5),
+                    ("BOTTOMPADDING", (0, 0), (-1, -1), 5),
+                ]))
+                elementos.append(KeepTogether([tabela, Spacer(1, 5)]))
+            continue
+        if linha.startswith("- "):
+            elementos.append(Paragraph("• " + _texto_pdf_markdown(linha[2:]), estilos["item"]))
+        else:
+            elementos.append(Paragraph(_texto_pdf_markdown(linha), estilos["corpo"]))
+        indice += 1
+
+    def rodape(canvas, doc) -> None:
+        canvas.saveState()
+        canvas.setStrokeColor(colors.HexColor("#CBD5E1"))
+        canvas.line(doc.leftMargin, 1.55 * cm, A4[0] - doc.rightMargin, 1.55 * cm)
+        canvas.setFont("Helvetica", 7.5)
+        canvas.setFillColor(cinza)
+        canvas.drawString(doc.leftMargin, 1.15 * cm, f"Página {doc.page}")
+        canvas.drawRightString(
+            A4[0] - doc.rightMargin,
+            1.15 * cm,
+            "Documento gerado automaticamente para revisão interna.",
+        )
+        canvas.drawCentredString(
+            A4[0] / 2,
+            0.78 * cm,
+            "Não representa liberação definitiva de frente de obra.",
+        )
+        canvas.restoreState()
+
+    documento.build(elementos, onFirstPage=rodape, onLaterPages=rodape)
+    return buffer.getvalue()
+
+
+def _nome_arquivo_pdf_relatorio(exportacao: dict[str, Any]) -> str:
+    obra = re.sub(r"[^A-Za-z0-9_-]+", "_", str(exportacao["obra_codigo"]).upper())
+    inicio = _data_operacional(exportacao["data_inicio"])
+    fim = _data_operacional(exportacao["data_fim"])
+    if inicio is None or fim is None:
+        raise ValueError("PERIODO_EXPORTACAO_INVALIDO")
+    return (
+        f"{obra}_RELATORIO_SEMANAL_EXECUTIVO_"
+        f"{inicio.isoformat()}_a_{fim.isoformat()}.pdf"
+    )
+
+
+def _gerar_pdf_relatorio_semanal_privado(
+    cur,
+    payload: GestaoOperacionalGerarPdfRelatorioSemanalRequest,
+) -> dict[str, Any]:
+    if not payload.salvar_pdf and not payload.armazenar_minio:
+        raise ValueError("DESTINO_PRIVADO_PDF_NAO_INFORMADO")
+    exportacao = _carregar_ou_criar_exportacao_para_pdf(cur, payload)
+    pdf_bytes = _gerar_bytes_pdf_relatorio_semanal(exportacao)
+    nome_arquivo = _nome_arquivo_pdf_relatorio(exportacao)
+    tamanho_bytes = len(pdf_bytes)
+    sha256 = hashlib.sha256(pdf_bytes).hexdigest()
+    inicio = _data_operacional(exportacao["data_inicio"])
+    fim = _data_operacional(exportacao["data_fim"])
+    if inicio is None or fim is None:
+        raise ValueError("PERIODO_EXPORTACAO_INVALIDO")
+
+    caminho_relativo = (
+        Path("outputs") / "relatorios_semanais"
+        / normalizar_nome_diretorio(exportacao["obra_codigo"])
+        / inicio.strftime("%Y") / inicio.strftime("%m") / nome_arquivo
+    )
+    caminho_local: str | None = None
+    bucket: str | None = None
+    object_key: str | None = None
+    minio_uri: str | None = None
+    erro_minio: str | None = None
+    alterou_minio = False
+
+    if payload.salvar_pdf:
+        caminho_relativo.parent.mkdir(parents=True, exist_ok=True)
+        caminho_relativo.write_bytes(pdf_bytes)
+        caminho_local = str(caminho_relativo)
+
+    if payload.armazenar_minio:
+        bucket_pdf = "obra-caio"
+        object_key_pdf = (
+            "12_relatorios_executivos/relatorios_semanais/"
+            f"{inicio:%Y}/{inicio:%m}/{nome_arquivo}"
+        )
+        try:
+            cliente = get_minio_client()
+            if not cliente.bucket_exists(bucket_pdf):
+                cliente.make_bucket(bucket_pdf)
+                alterou_minio = True
+            cliente.put_object(
+                bucket_name=bucket_pdf,
+                object_name=object_key_pdf,
+                data=BytesIO(pdf_bytes),
+                length=tamanho_bytes,
+                content_type="application/pdf",
+                metadata={"sha256": sha256, "mvp": "0.7J"},
+            )
+            bucket = bucket_pdf
+            object_key = object_key_pdf
+            minio_uri = f"s3://{bucket}/{object_key}"
+            alterou_minio = True
+        except Exception as exc:
+            erro_minio = _texto_curto(exc, 200)
+            if caminho_local is None:
+                caminho_relativo.parent.mkdir(parents=True, exist_ok=True)
+                caminho_relativo.write_bytes(pdf_bytes)
+                caminho_local = str(caminho_relativo)
+
+    flags_seguranca = {
+        **AGENTE_008_SEGURANCA_PDF,
+        "altera_minio": alterou_minio,
+    }
+    metadados = serializar_json_seguro({
+        "mvp": "0.7J",
+        "tipo": "PDF_PRIVADO_REVISAO",
+        "origem": "RELATORIO_SEMANAL_EXECUTIVO",
+        "sem_link_publico": True,
+        "sem_envio_externo": True,
+        "flags_seguranca": flags_seguranca,
+    })
+    status = "GERADO"
+    cur.execute(
+        """
+        INSERT INTO pdfs_relatorios_semanais_obra (
+            obra_codigo, area, exportacao_relatorio_id, relatorio_semanal_id,
+            data_inicio, data_fim, titulo, status, nome_arquivo, caminho_local,
+            bucket, object_key, minio_uri, tamanho_bytes, sha256,
+            enviado_para_terceiros, gerou_link_publico, alterou_rdo_oficial,
+            alterou_cronograma, executou_rpa, sincronizou_openproject, metadados
+        ) VALUES (
+            %(obra_codigo)s, %(area)s, %(exportacao_relatorio_id)s,
+            %(relatorio_semanal_id)s, %(data_inicio)s, %(data_fim)s, %(titulo)s,
+            %(status)s, %(nome_arquivo)s, %(caminho_local)s, %(bucket)s,
+            %(object_key)s, %(minio_uri)s, %(tamanho_bytes)s, %(sha256)s,
+            false, false, false, false, false, false, %(metadados)s
+        )
+        RETURNING id;
+        """,
+        {
+            "obra_codigo": exportacao["obra_codigo"],
+            "area": exportacao.get("area"),
+            "exportacao_relatorio_id": exportacao["id"],
+            "relatorio_semanal_id": exportacao.get("relatorio_semanal_id"),
+            "data_inicio": inicio,
+            "data_fim": fim,
+            "titulo": exportacao["titulo"],
+            "status": status,
+            "nome_arquivo": nome_arquivo,
+            "caminho_local": caminho_local,
+            "bucket": bucket,
+            "object_key": object_key,
+            "minio_uri": minio_uri,
+            "tamanho_bytes": tamanho_bytes,
+            "sha256": sha256,
+            "metadados": Json(metadados),
+        },
+    )
+    pdf_id = cur.fetchone()[0]
+    cur.execute(
+        """
+        UPDATE exportacoes_relatorios_semanais_obra
+        SET gerou_pdf = true, atualizado_em = NOW()
+        WHERE id = %(id)s;
+        """,
+        {"id": exportacao["id"]},
+    )
+
+    dados_telegram = serializar_json_seguro({
+        "obra_codigo": exportacao["obra_codigo"],
+        "data_inicio": inicio,
+        "data_fim": fim,
+        "pdf_id": pdf_id,
+        "nome_arquivo": nome_arquivo,
+        "armazenamento": minio_uri or caminho_local,
+    })
+    resposta_telegram = "\n".join([
+        f"📎 PDF privado gerado — {dados_telegram['obra_codigo']}",
+        "", "Período:",
+        f"{_formatar_data_br(dados_telegram['data_inicio'])} a "
+        f"{_formatar_data_br(dados_telegram['data_fim'])}",
+        "", "PDF:", f"#{dados_telegram['pdf_id']}",
+        "", "Arquivo:", dados_telegram["nome_arquivo"],
+        "", "Armazenamento:", dados_telegram["armazenamento"],
+        "", "Governança:",
+        "PDF gerado para revisão interna.",
+        "Nenhum envio externo, link público, RDO, cronograma, OpenProject ou RPA foi alterado.",
+    ])
+    resultado = {
+        "ok": True,
+        "mvp": "0.7J",
+        "pdf_id": pdf_id,
+        "exportacao_relatorio_id": exportacao["id"],
+        "relatorio_semanal_id": exportacao.get("relatorio_semanal_id"),
+        "obra_codigo": exportacao["obra_codigo"],
+        "area": exportacao.get("area"),
+        "data_inicio": inicio,
+        "data_fim": fim,
+        "titulo": exportacao["titulo"],
+        "status": status,
+        "nome_arquivo": nome_arquivo,
+        "caminho_local": caminho_local,
+        "bucket": bucket,
+        "object_key": object_key,
+        "minio_uri": minio_uri,
+        "tamanho_bytes": tamanho_bytes,
+        "sha256": sha256,
+        "metadados": metadados,
+        "exportacao_criada": exportacao["exportacao_criada"],
+        "aviso_minio": erro_minio,
+        "resposta_telegram": resposta_telegram,
+        "flags_seguranca": dict(flags_seguranca),
+        **flags_seguranca,
+    }
+    return serializar_json_seguro(resultado)
+
+
 @app.post("/agentes/gestao-operacional/relatorio-semanal-executivo")
 def relatorio_semanal_executivo(payload: GestaoOperacionalRelatorioSemanalRequest):
     try:
@@ -6241,6 +6696,32 @@ def exportar_relatorio_semanal(
     except Exception as exc:
         raise HTTPException(status_code=500, detail={
             "message": "Erro ao exportar relatório semanal executivo.",
+            "error": _texto_curto(exc, 200),
+        })
+
+
+@app.post("/agentes/gestao-operacional/gerar-pdf-relatorio-semanal")
+def gerar_pdf_relatorio_semanal(
+    payload: GestaoOperacionalGerarPdfRelatorioSemanalRequest,
+):
+    try:
+        with get_db_connection() as conn:
+            with conn.cursor() as cur:
+                resultado = _gerar_pdf_relatorio_semanal_privado(cur, payload)
+        return serializar_json_seguro(resultado)
+    except ValueError as exc:
+        codigo = str(exc)
+        status_code = 404 if codigo in {
+            "EXPORTACAO_RELATORIO_NAO_ENCONTRADA",
+            "RELATORIO_SEMANAL_NAO_ENCONTRADO",
+        } else 422
+        raise HTTPException(
+            status_code=status_code,
+            detail={"code": codigo, "message": codigo},
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail={
+            "message": "Erro ao gerar PDF privado do relatório semanal executivo.",
             "error": _texto_curto(exc, 200),
         })
 
@@ -6559,6 +7040,7 @@ def processar_comando_agente_gestao_operacional(
                           'GERAR_BRIEFING_DIARIO_OBRA',
                           'GERAR_RELATORIO_SEMANAL_EXECUTIVO_OBRA',
                           'EXPORTAR_RELATORIO_SEMANAL_EXECUTIVO_OBRA',
+                          'GERAR_PDF_RELATORIO_SEMANAL_EXECUTIVO_OBRA',
                           'CRIAR_ACAO_OPERACIONAL_OBRA',
                           'LISTAR_ACOES_OPERACIONAIS_OBRA',
                           'ATUALIZAR_ACAO_OPERACIONAL_OBRA',
@@ -6578,7 +7060,7 @@ def processar_comando_agente_gestao_operacional(
                     return {
                         "ok": True,
                         "agente": "AGENTE_008_GESTAO_OPERACIONAL_OBRA",
-                        "mvp": "0.7I",
+                        "mvp": "0.7J",
                         "status": "SEM_COMANDO_PENDENTE",
                         "message": (
                             "Nenhum comando PENDENTE para "
@@ -6782,6 +7264,32 @@ def processar_comando_agente_gestao_operacional(
                             "flags_seguranca": dict(AGENTE_008_SEGURANCA_EXPORTACAO),
                             **AGENTE_008_SEGURANCA_EXPORTACAO,
                         }
+                elif comando["tipo_comando"] == "GERAR_PDF_RELATORIO_SEMANAL_EXECUTIVO_OBRA":
+                    payload_pdf = {
+                        **(comando["payload_comando"] or {}),
+                        "obra_codigo": comando["obra_codigo"],
+                    }
+                    try:
+                        resultado = _gerar_pdf_relatorio_semanal_privado(
+                            cur,
+                            GestaoOperacionalGerarPdfRelatorioSemanalRequest(**payload_pdf),
+                        )
+                    except Exception as exc:
+                        codigo_erro = str(exc)
+                        resultado = {
+                            "ok": False,
+                            "codigo_erro": codigo_erro,
+                            "erro_controlado": (
+                                "PDF privado do relatório semanal não gerado: "
+                                f"{_texto_curto(exc)}"
+                            ),
+                            "resposta_telegram": (
+                                "Não foi possível gerar o PDF privado do relatório semanal. "
+                                f"Código: {codigo_erro}. Nenhuma ação externa foi realizada."
+                            ),
+                            "flags_seguranca": dict(AGENTE_008_SEGURANCA_PDF),
+                            **AGENTE_008_SEGURANCA_PDF,
+                        }
                 elif comando["tipo_comando"] == "CRIAR_ACAO_OPERACIONAL_OBRA":
                     dados_acao = {
                         **(comando["payload_comando"] or {}),
@@ -6829,6 +7337,7 @@ def processar_comando_agente_gestao_operacional(
                         "GERAR_BRIEFING_DIARIO_OBRA",
                         "GERAR_RELATORIO_SEMANAL_EXECUTIVO_OBRA",
                         "EXPORTAR_RELATORIO_SEMANAL_EXECUTIVO_OBRA",
+                        "GERAR_PDF_RELATORIO_SEMANAL_EXECUTIVO_OBRA",
                     }
                     and resultado.get("ok") is False
                     else "CONCLUIDO"
@@ -6863,11 +7372,12 @@ def processar_comando_agente_gestao_operacional(
             conn.close()
     except Exception as exc:
         if comando is not None:
-            flags_erro = (
-                AGENTE_008_SEGURANCA_EXPORTACAO
-                if comando["tipo_comando"] == "EXPORTAR_RELATORIO_SEMANAL_EXECUTIVO_OBRA"
-                else AGENTE_008_SEGURANCA_CONSULTA
-            )
+            if comando["tipo_comando"] == "EXPORTAR_RELATORIO_SEMANAL_EXECUTIVO_OBRA":
+                flags_erro = AGENTE_008_SEGURANCA_EXPORTACAO
+            elif comando["tipo_comando"] == "GERAR_PDF_RELATORIO_SEMANAL_EXECUTIVO_OBRA":
+                flags_erro = AGENTE_008_SEGURANCA_PDF
+            else:
+                flags_erro = AGENTE_008_SEGURANCA_CONSULTA
             resultado_erro = {
                 "ok": False,
                 "erro_controlado": str(exc),
@@ -6905,7 +7415,7 @@ def processar_comando_agente_gestao_operacional(
     return serializar_json_seguro({
         "ok": True,
         "agente": "AGENTE_008_GESTAO_OPERACIONAL_OBRA",
-        "mvp": "0.7I",
+        "mvp": "0.7J",
         "status_comando": status_resultado,
         "id_comando": str(comando["id_comando"]),
         "tipo_comando": comando["tipo_comando"],
@@ -7120,6 +7630,7 @@ async def receber_entrada_telegram(
         "GERAR_BRIEFING_DIARIO_OBRA",
         "GERAR_RELATORIO_SEMANAL_EXECUTIVO_OBRA",
         "EXPORTAR_RELATORIO_SEMANAL_EXECUTIVO_OBRA",
+        "GERAR_PDF_RELATORIO_SEMANAL_EXECUTIVO_OBRA",
         "CRIAR_ACAO_OPERACIONAL_OBRA",
         "LISTAR_ACOES_OPERACIONAIS_OBRA",
         "ATUALIZAR_ACAO_OPERACIONAL_OBRA",
@@ -7706,6 +8217,19 @@ async def receber_entrada_telegram(
                             "limite_itens": 10,
                             "salvar_exportacao": True,
                             **AGENTE_008_SEGURANCA_EXPORTACAO,
+                        }
+                    elif classificacao["tipo_comando"] == "GERAR_PDF_RELATORIO_SEMANAL_EXECUTIVO_OBRA":
+                        payload_comando = {
+                            "obra_codigo": obra_codigo,
+                            "area": extrair_area_diagnostico_operacional(normalized["conteudo"]),
+                            "data_inicio": None,
+                            "data_fim": None,
+                            "exportacao_relatorio_id": None,
+                            "relatorio_semanal_id": None,
+                            "limite_itens": 10,
+                            "salvar_pdf": True,
+                            "armazenar_minio": True,
+                            **AGENTE_008_SEGURANCA_PDF,
                         }
                     elif classificacao["tipo_comando"] == "CRIAR_ACAO_OPERACIONAL_OBRA":
                         payload_comando = {
