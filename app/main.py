@@ -1,4 +1,6 @@
 import hashlib
+import base64
+import binascii
 import html
 import re
 import json
@@ -468,6 +470,62 @@ class GestaoOperacionalLiberacoesRevisoesDocumentaisCampoRequest(BaseModel):
     limite_itens: int = Field(default=20, ge=1, le=200)
 
 
+class GestaoOperacionalRegistrarEvidenciaRequest(BaseModel):
+    tenant_id: str = "construtora-piloto"
+    obra_codigo: str = Field(min_length=1)
+    origem: str = "WHATSAPP"
+    canal_origem: str = "whatsapp"
+    remetente_nome: str | None = None
+    remetente_identificador: str | None = None
+    remetente_autorizado: bool = False
+    chat_id: str | None = None
+    message_id: str | None = None
+    provider_message_id: str | None = None
+    thread_id: str | None = None
+    tipo_evidencia: str = Field(pattern="^(TEXTO|FOTO|FOTO_COM_LEGENDA|AUDIO|DOCUMENTO|OUTRO)$")
+    subtipo_evidencia: str | None = None
+    texto_original: str | None = None
+    legenda: str | None = None
+    area: str | None = None
+    disciplina: str | None = None
+    frente_trabalho: str | None = None
+    categoria_operacional: str | None = None
+    data_evento: datetime | None = None
+    bucket: str | None = None
+    nome_arquivo_original: str | None = None
+    mime_type: str | None = None
+    arquivo_base64: str | None = None
+    metadados: dict[str, Any] = Field(default_factory=dict)
+
+
+class GestaoOperacionalRegistrarEvidenciaWhatsappRequest(BaseModel):
+    obra_codigo: str = Field(min_length=1)
+    remetente_nome: str | None = None
+    remetente_identificador: str | None = None
+    remetente_autorizado: bool = False
+    chat_id: str | None = None
+    message_id: str | None = None
+    provider_message_id: str | None = None
+    texto: str | None = None
+    legenda: str | None = None
+    tipo_midia: str | None = None
+    mime_type: str | None = None
+    nome_arquivo_original: str | None = None
+    arquivo_base64: str | None = None
+    metadados: dict[str, Any] = Field(default_factory=dict)
+
+
+class GestaoOperacionalEvidenciasRequest(BaseModel):
+    obra_codigo: str = Field(min_length=1)
+    area: str | None = None
+    disciplina: str | None = None
+    tipo_evidencia: str | None = Field(default=None, pattern="^(TEXTO|FOTO|FOTO_COM_LEGENDA|AUDIO|DOCUMENTO|OUTRO)$")
+    status_triagem: str | None = Field(default=None, pattern="^(RECEBIDA_AGUARDANDO_TRIAGEM|TRIAGEM_INICIADA|CLASSIFICADA|DESCARTADA|VINCULADA|INCLUIDA_RELATORIO)$")
+    data_inicio: datetime | date | None = None
+    data_fim: datetime | date | None = None
+    limite_itens: int = Field(default=20, ge=1, le=200)
+
+
 def get_db_connection():
     if not DATABASE_URL:
         raise RuntimeError("DATABASE_URL não definida.")
@@ -633,6 +691,20 @@ def classificar_intencao_executiva(conteudo: Optional[str]) -> dict[str, Any]:
     ]
     texto_comando = re.sub(r"\s+", " ", texto.strip().rstrip("?.!"))
     texto_comando_normalizado = normalizar_texto_comparacao(texto_comando)
+    comandos_evidencias = {
+        "evidencias de campo", "evidencias operacionais", "fotos recebidas da obra",
+        "fotos da obra", "mensagens do mestre", "ultimas evidencias",
+        "evidencias do refeitorio", "fotos do refeitorio",
+    }
+    if texto_comando_normalizado in comandos_evidencias:
+        return {
+            "intencao": "CONSULTAR_EVIDENCIAS_OPERACIONAIS_OBRA",
+            "agente_destino": "AGENTE_008_GESTAO_OPERACIONAL_OBRA",
+            "tipo_comando": "CONSULTAR_EVIDENCIAS_OPERACIONAIS_OBRA",
+            "requer_aprovacao": False,
+            "confianca": 0.99,
+            "justificativa": "Consulta auditável de evidências operacionais, sem alteração externa.",
+        }
     liberacao_campo = extrair_liberacao_revisao_campo_telegram(conteudo)
     if liberacao_campo:
         return {
@@ -5928,7 +6000,177 @@ def serializar_json_seguro(valor: Any) -> Any:
         return {chave: serializar_json_seguro(item) for chave, item in valor.items()}
     if isinstance(valor, (list, tuple)):
         return [serializar_json_seguro(item) for item in valor]
+    if isinstance(valor, bytes):
+        return None
     return valor
+
+
+AGENTE_008_SEGURANCA_EVIDENCIA = {
+    "modo": "REGISTRO_EVIDENCIA_OPERACIONAL",
+    "origem": "WHATSAPP",
+    "altera_cronograma": False,
+    "executa_rpa": False,
+    "sincroniza_openproject": False,
+    "altera_rdo_oficial": False,
+    "cria_pendencia_automaticamente": False,
+    "cria_acao_automaticamente": False,
+    "envia_terceiros": False,
+    "envia_arquivos": False,
+    "gera_links_publicos": False,
+    "anexa_relatorio_automaticamente": False,
+    "altera_minio": False,
+    "move_arquivos_minio": False,
+    "apaga_arquivos_minio": False,
+    "aprova_execucao_automaticamente": False,
+    "evidencia_nao_e_rdo_oficial": True,
+    "linguagem": "CONSULTIVA",
+}
+
+
+def _inferir_area_disciplina_evidencia(*partes: str | None) -> tuple[str | None, str | None]:
+    texto = normalizar_texto_comparacao(" ".join(item for item in partes if item))
+    area = "refeitorio" if re.search(r"\brefeitorio\b", texto) else None
+    regras = (
+        ("hidraulica", ("hidraulica", "tubo", "esgoto", "agua")),
+        ("eletrica", ("eletrica", "quadro", "cabo")),
+        ("estrutura", ("estrutura", "armacao", "concreto", "forma")),
+        ("incendio", ("incendio", "hidrante", "sprinkler")),
+    )
+    disciplinas = [valor for valor, termos in regras if any(re.search(rf"\b{re.escape(termo)}\b", texto) for termo in termos)]
+    return area, disciplinas[0] if len(disciplinas) == 1 else None
+
+
+def _decodificar_arquivo_base64(valor: str) -> bytes:
+    conteudo = valor.split(",", 1)[1] if valor.strip().lower().startswith("data:") and "," in valor else valor
+    try:
+        return base64.b64decode(re.sub(r"\s+", "", conteudo), validate=True)
+    except (binascii.Error, ValueError) as exc:
+        raise HTTPException(status_code=422, detail="arquivo_base64 inválido.") from exc
+
+
+def _extensao_evidencia(nome: str | None, mime_type: str | None) -> str:
+    extensao = Path(nome or "").suffix.lower().lstrip(".")
+    if extensao and re.fullmatch(r"[a-z0-9]{1,10}", extensao):
+        return extensao
+    por_mime = {"image/jpeg": "jpg", "image/png": "png", "image/webp": "webp", "audio/ogg": "ogg", "audio/mpeg": "mp3", "application/pdf": "pdf"}
+    return por_mime.get((mime_type or "").lower(), "bin")
+
+
+def _registrar_evidencia_operacional(cur: Any, payload: GestaoOperacionalRegistrarEvidenciaRequest) -> dict[str, Any]:
+    dados = payload.model_dump()
+    dados["obra_codigo"] = dados["obra_codigo"].strip().upper()
+    if not dados["obra_codigo"]:
+        raise HTTPException(status_code=422, detail="obra_codigo é obrigatório.")
+    if dados["tipo_evidencia"] == "TEXTO" and not ((dados["texto_original"] or "").strip() or (dados["legenda"] or "").strip()):
+        raise HTTPException(status_code=422, detail="Evidência TEXTO exige texto_original ou legenda.")
+
+    if dados["provider_message_id"]:
+        cur.execute("SELECT pg_advisory_xact_lock(hashtext(%s))", (f"{dados['obra_codigo']}:{dados['canal_origem']}:{dados['provider_message_id']}",))
+        cur.execute(
+            "SELECT id, alterou_minio FROM evidencias_operacionais_obra WHERE obra_codigo = %s AND canal_origem = %s AND provider_message_id = %s",
+            (dados["obra_codigo"], dados["canal_origem"], dados["provider_message_id"]),
+        )
+        existente = cur.fetchone()
+        if existente:
+            flags = {**AGENTE_008_SEGURANCA_EVIDENCIA, "altera_minio": False}
+            return serializar_json_seguro({"ok": True, "status": "JA_REGISTRADA", "evidencia_id": existente[0], "midia_nao_armazenada": not existente[1], "flags_seguranca": flags, **flags})
+
+    area_inferida, disciplina_inferida = _inferir_area_disciplina_evidencia(
+        dados["texto_original"], dados["legenda"], dados["nome_arquivo_original"]
+    )
+    dados["area"] = dados["area"] or area_inferida
+    dados["disciplina"] = dados["disciplina"] or disciplina_inferida
+    descricao = next((str(item).strip() for item in (dados["legenda"], dados["texto_original"], dados["nome_arquivo_original"]) if item and str(item).strip()), "Evidência operacional recebida")
+    dados["descricao_curta"] = descricao[:240]
+    dados.update({"object_key": None, "minio_uri": None, "nome_arquivo_armazenado": None, "extensao": None, "tamanho_bytes": None, "sha256": None, "alterou_minio": False})
+
+    if dados["arquivo_base64"]:
+        arquivo = _decodificar_arquivo_base64(dados["arquivo_base64"])
+        if not arquivo:
+            raise HTTPException(status_code=422, detail="arquivo_base64 não pode representar arquivo vazio.")
+        agora = datetime.now(timezone.utc)
+        dados["sha256"] = hashlib.sha256(arquivo).hexdigest()
+        dados["tamanho_bytes"] = len(arquivo)
+        dados["extensao"] = _extensao_evidencia(dados["nome_arquivo_original"], dados["mime_type"])
+        hash_curto = dados["sha256"][:12]
+        nome = f"{dados['obra_codigo']}_WHATSAPP_{dados['tipo_evidencia']}_{agora.strftime('%Y%m%d_%H%M%S')}_{hash_curto}.{dados['extensao']}"
+        dados["bucket"] = dados["bucket"] or "obra-caio"
+        dados["nome_arquivo_armazenado"] = nome
+        dados["object_key"] = f"05_fotos_obra/evidencias_campo/{agora:%Y/%m/%d}/{nome}"
+        cliente = get_minio_client()
+        if not cliente.bucket_exists(dados["bucket"]):
+            cliente.make_bucket(dados["bucket"])
+        cliente.put_object(dados["bucket"], dados["object_key"], BytesIO(arquivo), len(arquivo), content_type=dados["mime_type"] or "application/octet-stream")
+        dados["minio_uri"] = f"s3://{dados['bucket']}/{dados['object_key']}"
+        dados["alterou_minio"] = True
+    else:
+        dados["bucket"] = None
+
+    flags_persistidas = {**AGENTE_008_SEGURANCA_EVIDENCIA, "altera_minio": dados["alterou_minio"]}
+    metadados = serializar_json_seguro({
+        **(dados["metadados"] or {}),
+        "flags_seguranca": flags_persistidas,
+        "midia_nao_armazenada": dados["tipo_evidencia"] != "TEXTO" and not dados["alterou_minio"],
+    })
+    cur.execute(
+        """INSERT INTO evidencias_operacionais_obra (
+               tenant_id, obra_codigo, origem, canal_origem, remetente_nome, remetente_identificador,
+               remetente_autorizado, chat_id, message_id, provider_message_id, thread_id, tipo_evidencia,
+               subtipo_evidencia, texto_original, legenda, descricao_curta, area, disciplina, frente_trabalho,
+               categoria_operacional, data_evento, bucket, object_key, minio_uri, nome_arquivo_original,
+               nome_arquivo_armazenado, mime_type, extensao, tamanho_bytes, sha256, alterou_minio, metadados)
+           VALUES (%(tenant_id)s, %(obra_codigo)s, %(origem)s, %(canal_origem)s, %(remetente_nome)s,
+               %(remetente_identificador)s, %(remetente_autorizado)s, %(chat_id)s, %(message_id)s,
+               %(provider_message_id)s, %(thread_id)s, %(tipo_evidencia)s, %(subtipo_evidencia)s,
+               %(texto_original)s, %(legenda)s, %(descricao_curta)s, %(area)s, %(disciplina)s,
+               %(frente_trabalho)s, %(categoria_operacional)s, %(data_evento)s, %(bucket)s, %(object_key)s,
+               %(minio_uri)s, %(nome_arquivo_original)s, %(nome_arquivo_armazenado)s, %(mime_type)s,
+               %(extensao)s, %(tamanho_bytes)s, %(sha256)s, %(alterou_minio)s, %(metadados)s)
+           RETURNING id, criado_em""",
+        {**dados, "metadados": Json(metadados)},
+    )
+    evidencia_id, criado_em = cur.fetchone()
+    flags = flags_persistidas
+    return serializar_json_seguro({
+        "ok": True, "status": "REGISTRADA", "evidencia_id": evidencia_id,
+        "criado_em": criado_em, "tipo_evidencia": dados["tipo_evidencia"], "area": dados["area"],
+        "disciplina": dados["disciplina"], "minio_uri": dados["minio_uri"],
+        "midia_nao_armazenada": dados["tipo_evidencia"] != "TEXTO" and not dados["alterou_minio"],
+        "flags_seguranca": flags, **flags,
+    })
+
+
+def _consultar_evidencias_operacionais(cur: Any, payload: GestaoOperacionalEvidenciasRequest) -> dict[str, Any]:
+    inicio = payload.data_inicio or (datetime.now(timezone.utc) - timedelta(days=7))
+    fim = payload.data_fim or datetime.now(timezone.utc)
+    if isinstance(inicio, date) and not isinstance(inicio, datetime):
+        inicio = datetime.combine(inicio, datetime.min.time(), tzinfo=timezone.utc)
+    if isinstance(fim, date) and not isinstance(fim, datetime):
+        fim = datetime.combine(fim + timedelta(days=1), datetime.min.time(), tzinfo=timezone.utc)
+    filtros = {**payload.model_dump(), "data_inicio": inicio, "data_fim": fim}
+    where = """obra_codigo = %(obra_codigo)s AND data_recebimento >= %(data_inicio)s AND data_recebimento <= %(data_fim)s
+        AND (%(area)s IS NULL OR area = %(area)s) AND (%(disciplina)s IS NULL OR disciplina = %(disciplina)s)
+        AND (%(tipo_evidencia)s IS NULL OR tipo_evidencia = %(tipo_evidencia)s)
+        AND (%(status_triagem)s IS NULL OR status_triagem = %(status_triagem)s)"""
+    cur.execute(f"""SELECT COUNT(*), COUNT(*) FILTER (WHERE tipo_evidencia = 'TEXTO'),
+        COUNT(*) FILTER (WHERE tipo_evidencia IN ('FOTO','FOTO_COM_LEGENDA')),
+        COUNT(*) FILTER (WHERE tipo_evidencia = 'AUDIO'), COUNT(*) FILTER (WHERE tipo_evidencia = 'DOCUMENTO'),
+        COUNT(*) FILTER (WHERE status_triagem = 'RECEBIDA_AGUARDANDO_TRIAGEM')
+        FROM evidencias_operacionais_obra WHERE {where}""", filtros)
+    totais = cur.fetchone()
+    def agrupamento(campo: str) -> dict[str, int]:
+        cur.execute(f"SELECT {campo}, COUNT(*) FROM evidencias_operacionais_obra WHERE {where} AND {campo} IS NOT NULL GROUP BY {campo} ORDER BY COUNT(*) DESC, {campo}", filtros)
+        return {str(chave): quantidade for chave, quantidade in cur.fetchall()}
+    cur.execute(f"""SELECT id, tipo_evidencia, area, disciplina, descricao_curta, data_recebimento,
+        status_triagem, minio_uri FROM evidencias_operacionais_obra WHERE {where}
+        ORDER BY data_recebimento DESC, id DESC LIMIT %(limite_itens)s""", filtros)
+    campos = ("id", "tipo_evidencia", "area", "disciplina", "descricao_curta", "data_recebimento", "status_triagem", "minio_uri")
+    ultimas = [serializar_json_seguro(dict(zip(campos, row))) for row in cur.fetchall()]
+    linhas = [f"📷 Evidências operacionais — {payload.obra_codigo}", "", "Resumo:", f"- Total no período: {totais[0]}", f"- Fotos: {totais[2]}", f"- Textos: {totais[1]}", f"- Áudios: {totais[3]}", f"- Aguardando triagem: {totais[5]}", "", "Últimas evidências:"]
+    linhas.extend([f"- #{item['id']} [{item['tipo_evidencia']}] {(item['area'] or 'Área não informada')}/{(item['disciplina'] or 'Disciplina não informada')} — {item['descricao_curta']}" for item in ultimas] or ["- Nenhuma evidência encontrada."])
+    linhas.extend(["", "Governança:", "Consulta de evidências. Nenhum RDO, cronograma, pendência, ação operacional, relatório, MinIO, OpenProject ou RPA foi alterado."])
+    flags = {**AGENTE_008_SEGURANCA_EVIDENCIA, "modo": "CONSULTA_EVIDENCIAS_OPERACIONAIS", "altera_minio": False}
+    return serializar_json_seguro({"ok": True, "obra_codigo": payload.obra_codigo, "data_inicio": inicio, "data_fim": fim, "total_evidencias": totais[0], "total_textos": totais[1], "total_fotos": totais[2], "total_audios": totais[3], "total_documentos": totais[4], "aguardando_triagem": totais[5], "por_area": agrupamento("area"), "por_disciplina": agrupamento("disciplina"), "ultimas_evidencias": ultimas, "resposta_telegram": "\n".join(linhas), "flags_seguranca": flags, **flags})
 
 
 def _inferir_metadados_revisao(nome: str, object_key: str | None) -> dict[str, str | None]:
@@ -8632,6 +8874,55 @@ def detalhe_acao_operacional(payload: GestaoOperacionalDetalheAcaoRequest):
             return _detalhar_acao_operacional(cur, payload)
 
 
+@app.post("/agentes/gestao-operacional/registrar-evidencia-operacional")
+def registrar_evidencia_operacional(payload: GestaoOperacionalRegistrarEvidenciaRequest):
+    try:
+        with get_db_connection() as conn:
+            with conn.cursor() as cur:
+                return _registrar_evidencia_operacional(cur, payload)
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail={"message": "Erro ao registrar evidência operacional.", "error": _texto_curto(exc, 200)})
+
+
+@app.post("/agentes/gestao-operacional/registrar-evidencia-whatsapp")
+def registrar_evidencia_whatsapp(payload: GestaoOperacionalRegistrarEvidenciaWhatsappRequest):
+    tipo_midia = (payload.tipo_midia or "").strip().lower()
+    if not tipo_midia and (payload.texto or payload.legenda):
+        tipo_evidencia = "TEXTO"
+    elif tipo_midia == "image":
+        tipo_evidencia = "FOTO_COM_LEGENDA" if (payload.legenda or payload.texto) else "FOTO"
+    elif tipo_midia == "audio":
+        tipo_evidencia = "AUDIO"
+    elif tipo_midia == "document":
+        tipo_evidencia = "DOCUMENTO"
+    else:
+        tipo_evidencia = "OUTRO"
+    geral = GestaoOperacionalRegistrarEvidenciaRequest(
+        obra_codigo=payload.obra_codigo, origem="WHATSAPP", canal_origem="whatsapp",
+        remetente_nome=payload.remetente_nome, remetente_identificador=payload.remetente_identificador,
+        remetente_autorizado=payload.remetente_autorizado, chat_id=payload.chat_id,
+        message_id=payload.message_id, provider_message_id=payload.provider_message_id,
+        tipo_evidencia=tipo_evidencia, texto_original=payload.texto, legenda=payload.legenda,
+        nome_arquivo_original=payload.nome_arquivo_original, mime_type=payload.mime_type,
+        arquivo_base64=payload.arquivo_base64, metadados=payload.metadados,
+    )
+    return registrar_evidencia_operacional(geral)
+
+
+@app.post("/agentes/gestao-operacional/evidencias-operacionais")
+def consultar_evidencias_operacionais(payload: GestaoOperacionalEvidenciasRequest):
+    try:
+        with get_db_connection() as conn:
+            with conn.cursor() as cur:
+                return _consultar_evidencias_operacionais(cur, payload)
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail={"message": "Erro ao consultar evidências operacionais.", "error": _texto_curto(exc, 200)})
+
+
 @app.post("/agentes/gestao-operacional/processar-comando")
 def processar_comando_agente_gestao_operacional(
     payload: Optional[ProcessarComandoGestaoOperacionalRequest] = None,
@@ -8687,7 +8978,8 @@ def processar_comando_agente_gestao_operacional(
                           'IMPORTAR_REVISOES_DOCUMENTAIS_PENDENTES_OBRA',
                           'APROVAR_REVISAO_DOCUMENTAL_OBRA',
                           'LIBERAR_REVISAO_DOCUMENTAL_CAMPO_OBRA',
-                          'CONSULTAR_LIBERACOES_REVISOES_DOCUMENTAIS_CAMPO_OBRA'
+                          'CONSULTAR_LIBERACOES_REVISOES_DOCUMENTAIS_CAMPO_OBRA',
+                          'CONSULTAR_EVIDENCIAS_OPERACIONAIS_OBRA'
                       )
                       AND ce.status = 'PENDENTE'
                       AND (%(id_comando)s::uuid IS NULL OR ce.id_comando = %(id_comando)s::uuid)
@@ -9098,6 +9390,15 @@ def processar_comando_agente_gestao_operacional(
                             resultado = _listar_liberacoes_revisoes_campo(cur, GestaoOperacionalLiberacoesRevisoesDocumentaisCampoRequest(**dados_consulta))
                     except Exception as exc:
                         resultado = {"ok": False, "erro_controlado": _texto_curto(exc), "resposta_telegram": "Não foi possível consultar as liberações documentais de campo.", "flags_seguranca": dict(AGENTE_008_SEGURANCA_LIBERACAO_CAMPO), **AGENTE_008_SEGURANCA_LIBERACAO_CAMPO}
+                elif comando["tipo_comando"] == "CONSULTAR_EVIDENCIAS_OPERACIONAIS_OBRA":
+                    dados_evidencias = {**(comando["payload_comando"] or {}), "obra_codigo": comando["obra_codigo"]}
+                    campos_payload = set(GestaoOperacionalEvidenciasRequest.model_fields)
+                    dados_evidencias = {chave: valor for chave, valor in dados_evidencias.items() if chave in campos_payload}
+                    try:
+                        resultado = _consultar_evidencias_operacionais(cur, GestaoOperacionalEvidenciasRequest(**dados_evidencias))
+                    except Exception as exc:
+                        flags = {**AGENTE_008_SEGURANCA_EVIDENCIA, "modo": "CONSULTA_EVIDENCIAS_OPERACIONAIS", "altera_minio": False}
+                        resultado = {"ok": False, "erro_controlado": _texto_curto(exc), "resposta_telegram": "Não foi possível consultar as evidências operacionais. Nenhuma alteração externa foi realizada.", "flags_seguranca": flags, **flags}
                 else:
                     resultado = _resultado_consulta_documentos_classificados(
                         cur, comando["obra_codigo"], comando["payload_comando"]
@@ -9121,6 +9422,7 @@ def processar_comando_agente_gestao_operacional(
                         "APROVAR_REVISAO_DOCUMENTAL_OBRA",
                         "LIBERAR_REVISAO_DOCUMENTAL_CAMPO_OBRA",
                         "CONSULTAR_LIBERACOES_REVISOES_DOCUMENTAIS_CAMPO_OBRA",
+                        "CONSULTAR_EVIDENCIAS_OPERACIONAIS_OBRA",
                     }
                     and resultado.get("ok") is False
                     else "CONCLUIDO"
@@ -9167,6 +9469,8 @@ def processar_comando_agente_gestao_operacional(
                 flags_erro = AGENTE_008_SEGURANCA_APROVACAO_DOCUMENTAL
             elif comando["tipo_comando"] in {"LIBERAR_REVISAO_DOCUMENTAL_CAMPO_OBRA", "CONSULTAR_LIBERACOES_REVISOES_DOCUMENTAIS_CAMPO_OBRA"}:
                 flags_erro = AGENTE_008_SEGURANCA_LIBERACAO_CAMPO
+            elif comando["tipo_comando"] == "CONSULTAR_EVIDENCIAS_OPERACIONAIS_OBRA":
+                flags_erro = {**AGENTE_008_SEGURANCA_EVIDENCIA, "modo": "CONSULTA_EVIDENCIAS_OPERACIONAIS", "altera_minio": False}
             else:
                 flags_erro = AGENTE_008_SEGURANCA_CONSULTA
             resultado_erro = {
@@ -9207,7 +9511,9 @@ def processar_comando_agente_gestao_operacional(
         "ok": True,
         "agente": "AGENTE_008_GESTAO_OPERACIONAL_OBRA",
         "mvp": (
-            "0.8A"
+            "0.8E"
+            if comando["tipo_comando"] == "CONSULTAR_EVIDENCIAS_OPERACIONAIS_OBRA"
+            else "0.8A"
             if comando["tipo_comando"] in {
                 "CONSULTAR_REVISOES_DOCUMENTAIS_OBRA",
                 "IMPORTAR_REVISOES_DOCUMENTAIS_PENDENTES_OBRA",
@@ -9446,6 +9752,7 @@ async def receber_entrada_telegram(
         "APROVAR_REVISAO_DOCUMENTAL_OBRA",
         "LIBERAR_REVISAO_DOCUMENTAL_CAMPO_OBRA",
         "CONSULTAR_LIBERACOES_REVISOES_DOCUMENTAIS_CAMPO_OBRA",
+        "CONSULTAR_EVIDENCIAS_OPERACIONAIS_OBRA",
     }
     obra_codigo = payload.obra_codigo or "OBRA-CAIO"
     if (
@@ -10163,6 +10470,14 @@ async def receber_entrada_telegram(
                             "obra_codigo": obra_codigo, "area": None, "disciplina": None,
                             "status_liberacao": None, "limite_itens": 20,
                             **AGENTE_008_SEGURANCA_LIBERACAO_CAMPO,
+                        }
+                    elif classificacao["tipo_comando"] == "CONSULTAR_EVIDENCIAS_OPERACIONAIS_OBRA":
+                        area_evidencia = "refeitorio" if "refeitorio" in normalizar_texto_comparacao(normalized["conteudo"]) else None
+                        payload_comando = {
+                            "obra_codigo": obra_codigo, "area": area_evidencia,
+                            "disciplina": None, "tipo_evidencia": None,
+                            "status_triagem": None, "data_inicio": None, "data_fim": None,
+                            "limite_itens": 20,
                         }
 
                 cur.execute(
