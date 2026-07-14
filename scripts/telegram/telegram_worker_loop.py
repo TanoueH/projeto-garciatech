@@ -99,6 +99,10 @@ def capturar_e_encaminhar(token: str, api_core_url: str) -> dict[str, int | None
             )
             if 200 <= status_code < 300 and body.get("ok") is True:
                 enviados += 1
+                resposta_direta = body.get("resposta_telegram")
+                chat_id = payload.get("chat_id")
+                if resposta_direta and chat_id:
+                    enviar_mensagem_telegram(token, str(chat_id), str(resposta_direta))
             else:
                 falhas += 1
                 log_json(
