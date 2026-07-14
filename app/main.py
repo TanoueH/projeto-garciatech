@@ -398,6 +398,40 @@ class GestaoOperacionalDetalheAcaoRequest(BaseModel):
     incluir_historico: bool = True
 
 
+class GestaoOperacionalRegistrarRevisaoDocumentalRequest(BaseModel):
+    obra_codigo: str = Field(min_length=1)
+    documento_minio_id: int | None = Field(default=None, gt=0)
+    bucket: str | None = None
+    object_key: str | None = None
+    nome_arquivo_original: str = Field(min_length=1)
+    disciplina: str | None = None
+    area: str | None = None
+    codigo_documento: str | None = None
+    titulo_documento: str | None = None
+    revisao_detectada: str | None = None
+    data_documento: date | None = None
+    tipo_documento: str | None = "PROJETO"
+    motivo_alteracao: str | None = None
+    responsavel_upload: str | None = None
+    observacao: str | None = None
+
+
+class GestaoOperacionalRevisoesDocumentaisRequest(BaseModel):
+    obra_codigo: str = Field(min_length=1)
+    area: str | None = None
+    disciplina: str | None = None
+    status_revisao: str | None = Field(default=None, pattern="^(RECEBIDO_PARA_ANALISE|EM_ANALISE_TECNICA|APROVADO_COMO_VIGENTE|REJEITADO|SUBSTITUIDO|OBSOLETO|AS_BUILT)$")
+    status_vigencia: str | None = Field(default=None, pattern="^(NAO_VIGENTE|VIGENTE|SUBSTITUIDO|OBSOLETO|HISTORICO)$")
+    limite_itens: int = Field(default=20, ge=1, le=200)
+
+
+class GestaoOperacionalImportarRevisoesDocumentaisRequest(BaseModel):
+    obra_codigo: str = Field(min_length=1)
+    bucket: str = Field(min_length=1)
+    prefixo: str = Field(min_length=1)
+    limite_itens: int = Field(default=50, ge=1, le=500)
+
+
 def get_db_connection():
     if not DATABASE_URL:
         raise RuntimeError("DATABASE_URL não definida.")
@@ -659,6 +693,32 @@ def classificar_intencao_executiva(conteudo: Optional[str]) -> dict[str, Any]:
         "gerar pdf do relatorio semanal do refeitorio",
         "preparar pdf para revisao",
     }
+    comandos_consultar_revisoes = {
+        "revisoes documentais da obra", "documentos recebidos para analise",
+        "projetos recebidos para analise", "ultimas revisoes de projeto",
+        "status das revisoes documentais",
+    }
+    comandos_importar_revisoes = {
+        "importar revisoes documentais pendentes",
+        "registrar documentos recebidos para analise",
+        "registrar projetos recebidos para analise",
+    }
+    if texto_comando_normalizado in comandos_importar_revisoes:
+        return {
+            "intencao": "IMPORTAR_REVISOES_DOCUMENTAIS_PENDENTES_OBRA",
+            "agente_destino": "AGENTE_008_GESTAO_OPERACIONAL_OBRA",
+            "tipo_comando": "IMPORTAR_REVISOES_DOCUMENTAIS_PENDENTES_OBRA",
+            "requer_aprovacao": False, "confianca": 0.99,
+            "justificativa": "Registro interno de arquivos já indexados, sem alteração no MinIO.",
+        }
+    if texto_comando_normalizado in comandos_consultar_revisoes:
+        return {
+            "intencao": "CONSULTAR_REVISOES_DOCUMENTAIS_OBRA",
+            "agente_destino": "AGENTE_008_GESTAO_OPERACIONAL_OBRA",
+            "tipo_comando": "CONSULTAR_REVISOES_DOCUMENTAIS_OBRA",
+            "requer_aprovacao": False, "confianca": 0.99,
+            "justificativa": "Consulta ao controle documental sem liberação de execução.",
+        }
     if texto_comando_normalizado in comandos_pdf_relatorio_semanal:
         return {
             "intencao": "GERAR_PDF_RELATORIO_SEMANAL_EXECUTIVO_OBRA",
@@ -1210,6 +1270,24 @@ AGENTE_008_SEGURANCA_CONSULTA = {
     "gera_links_publicos": False,
     "altera_minio": False,
     "aprova_execucao_automaticamente": False,
+    "linguagem": "CONSULTIVA",
+}
+
+AGENTE_008_SEGURANCA_CONTROLE_DOCUMENTAL = {
+    "modo": "CONTROLE_DOCUMENTAL_CONSULTIVO",
+    "altera_cronograma": False,
+    "executa_rpa": False,
+    "sincroniza_openproject": False,
+    "altera_rdo_oficial": False,
+    "envia_terceiros": False,
+    "envia_arquivos": False,
+    "gera_links_publicos": False,
+    "altera_minio": False,
+    "move_arquivos_minio": False,
+    "apaga_arquivos_minio": False,
+    "libera_execucao_campo": False,
+    "aprova_execucao_automaticamente": False,
+    "documento_vira_vigente_automaticamente": False,
     "linguagem": "CONSULTIVA",
 }
 
@@ -5717,6 +5795,149 @@ def serializar_json_seguro(valor: Any) -> Any:
     return valor
 
 
+def _inferir_metadados_revisao(nome: str, object_key: str | None) -> dict[str, str | None]:
+    """Infere somente padrões explícitos; na dúvida mantém o campo vazio."""
+    texto = normalizar_texto_comparacao(f"{object_key or ''} {nome}")
+    disciplinas = {
+        "arquitetura": "ARQUITETURA", "arquitetonico": "ARQUITETURA",
+        "estrutura": "ESTRUTURA", "estrutural": "ESTRUTURA",
+        "eletrica": "ELETRICA", "hidraulica": "HIDRAULICA",
+        "incendio": "INCENDIO", "climatizacao": "CLIMATIZACAO",
+    }
+    disciplina = next((valor for termo, valor in disciplinas.items() if re.search(rf"\b{termo}\b", texto)), None)
+    revisao = None
+    match_revisao = re.search(r"(?:^|[^a-z0-9])(?:rev|revisao)[ _.-]*([a-z0-9]{1,8})(?:[^a-z0-9]|$)", f" {nome.casefold()} ")
+    if match_revisao:
+        revisao = match_revisao.group(1).upper()
+    codigo = None
+    stem = nome.rsplit(".", 1)[0]
+    match_codigo = re.match(r"^([A-Za-z]{1,6}[-_][A-Za-z0-9][A-Za-z0-9_-]{1,30})", stem)
+    if match_codigo:
+        codigo = match_codigo.group(1).upper().replace("_", "-")
+    area = None
+    match_area = re.search(r"(?:^|[/_-])(?:area|setor|pavimento|pav)[ _-]*([a-z0-9]+)", normalizar_texto_comparacao(object_key or "").replace(" ", "_"))
+    if match_area:
+        area = match_area.group(1).upper()
+    return {"disciplina": disciplina, "area": area, "revisao_detectada": revisao, "codigo_documento": codigo}
+
+
+def _registrar_revisao_documental(cur, payload: GestaoOperacionalRegistrarRevisaoDocumentalRequest) -> dict[str, Any]:
+    dados = payload.model_dump()
+    dados["obra_codigo"] = payload.obra_codigo.strip()
+    dados["nome_arquivo_original"] = payload.nome_arquivo_original.strip()
+    if not dados["obra_codigo"] or not dados["nome_arquivo_original"]:
+        raise ValueError("obra_codigo e nome_arquivo_original são obrigatórios.")
+    if payload.documento_minio_id:
+        cur.execute("SELECT to_regclass('public.documentos_minio_obra')")
+        tabela_documentos_existe = cur.fetchone()[0] is not None
+    else:
+        tabela_documentos_existe = False
+    if payload.documento_minio_id and tabela_documentos_existe:
+        cur.execute(
+            """SELECT bucket, object_key, nome_arquivo, pasta_origem, disciplina_original,
+                      categoria_documental
+               FROM documentos_minio_obra
+               WHERE id = %(id)s AND obra_codigo = %(obra_codigo)s""",
+            {"id": payload.documento_minio_id, "obra_codigo": dados["obra_codigo"]},
+        )
+        documento = cur.fetchone()
+        if documento:
+            for campo, valor in zip(
+                ("bucket", "object_key", "nome_arquivo_original", "caminho_origem", "disciplina", "tipo_documento"),
+                documento,
+            ):
+                if not dados.get(campo) and valor:
+                    dados[campo] = valor
+    inferidos = _inferir_metadados_revisao(dados["nome_arquivo_original"], dados.get("object_key"))
+    for campo, valor in inferidos.items():
+        if not dados.get(campo):
+            dados[campo] = valor
+    dados["minio_uri"] = (
+        f"s3://{dados['bucket']}/{str(dados['object_key']).lstrip('/')}"
+        if dados.get("bucket") and dados.get("object_key") else None
+    )
+    metadados = serializar_json_seguro({"inferencia_conservadora": inferidos})
+    cur.execute(
+        """INSERT INTO revisoes_documentais_obra (
+               obra_codigo, documento_minio_id, bucket, object_key, minio_uri,
+               nome_arquivo_original, caminho_origem, disciplina, area,
+               codigo_documento, titulo_documento, revisao_detectada, data_documento,
+               tipo_documento, motivo_alteracao, responsavel_upload, observacao, metadados,
+               status_revisao, status_vigencia, liberado_para_campo
+           ) VALUES (
+               %(obra_codigo)s, %(documento_minio_id)s, %(bucket)s, %(object_key)s,
+               %(minio_uri)s, %(nome_arquivo_original)s, %(caminho_origem)s,
+               %(disciplina)s, %(area)s, %(codigo_documento)s, %(titulo_documento)s,
+               %(revisao_detectada)s, %(data_documento)s, %(tipo_documento)s,
+               %(motivo_alteracao)s, %(responsavel_upload)s, %(observacao)s, %(metadados)s,
+               'RECEBIDO_PARA_ANALISE', 'NAO_VIGENTE', FALSE
+           ) RETURNING id, criado_em""",
+        {**dados, "caminho_origem": dados.get("caminho_origem"), "metadados": Json(metadados)},
+    )
+    revisao_id, criado_em = cur.fetchone()
+    return serializar_json_seguro({
+        "ok": True, "mvp": "0.8A", "revisao_documental_id": revisao_id,
+        "obra_codigo": dados["obra_codigo"], "status_revisao": "RECEBIDO_PARA_ANALISE",
+        "status_vigencia": "NAO_VIGENTE", "liberado_para_campo": False,
+        "minio_uri": dados["minio_uri"], "criado_em": criado_em,
+        "flags_seguranca": dict(AGENTE_008_SEGURANCA_CONTROLE_DOCUMENTAL),
+        **AGENTE_008_SEGURANCA_CONTROLE_DOCUMENTAL,
+    })
+
+
+def _revisao_documental_dict(row: tuple[Any, ...]) -> dict[str, Any]:
+    campos = ("id", "obra_codigo", "disciplina", "area", "codigo_documento", "titulo_documento", "revisao_detectada", "nome_arquivo_original", "bucket", "object_key", "minio_uri", "status_revisao", "status_vigencia", "liberado_para_campo", "data_documento", "criado_em", "atualizado_em")
+    return serializar_json_seguro(dict(zip(campos, row)))
+
+
+def _listar_revisoes_documentais(cur, payload: GestaoOperacionalRevisoesDocumentaisRequest) -> dict[str, Any]:
+    params = payload.model_dump()
+    base = """ FROM revisoes_documentais_obra WHERE obra_codigo = %(obra_codigo)s
+        AND (%(area)s IS NULL OR area = %(area)s)
+        AND (%(disciplina)s IS NULL OR disciplina = %(disciplina)s)"""
+    cur.execute("SELECT status_revisao, count(*)" + base + " GROUP BY status_revisao", params)
+    totais_revisao = {status: 0 for status in ("RECEBIDO_PARA_ANALISE", "EM_ANALISE_TECNICA", "APROVADO_COMO_VIGENTE", "REJEITADO", "SUBSTITUIDO", "OBSOLETO", "AS_BUILT")}
+    totais_revisao.update(dict(cur.fetchall()))
+    cur.execute("SELECT status_vigencia, count(*)" + base + " GROUP BY status_vigencia", params)
+    totais_vigencia = {status: 0 for status in ("NAO_VIGENTE", "VIGENTE", "SUBSTITUIDO", "OBSOLETO", "HISTORICO")}
+    totais_vigencia.update(dict(cur.fetchall()))
+    colunas = "id, obra_codigo, disciplina, area, codigo_documento, titulo_documento, revisao_detectada, nome_arquivo_original, bucket, object_key, minio_uri, status_revisao, status_vigencia, liberado_para_campo, data_documento, criado_em, atualizado_em"
+    cur.execute("SELECT " + colunas + base + " AND (%(status_revisao)s IS NULL OR status_revisao = %(status_revisao)s) AND (%(status_vigencia)s IS NULL OR status_vigencia = %(status_vigencia)s) ORDER BY criado_em DESC, id DESC LIMIT %(limite_itens)s", params)
+    ultimas = [_revisao_documental_dict(row) for row in cur.fetchall()]
+    grupos = {status: [item for item in ultimas if item["status_revisao"] == status] for status in ("RECEBIDO_PARA_ANALISE", "EM_ANALISE_TECNICA", "APROVADO_COMO_VIGENTE", "REJEITADO")}
+    linhas = [f"📚 Revisões documentais — {payload.obra_codigo}", "", "Resumo:", f"- Recebidas para análise: {totais_revisao['RECEBIDO_PARA_ANALISE']}", f"- Em análise técnica: {totais_revisao['EM_ANALISE_TECNICA']}", f"- Vigentes: {totais_vigencia['VIGENTE']}", f"- Rejeitadas: {totais_revisao['REJEITADO']}", f"- Obsoletas/substituídas: {totais_revisao['OBSOLETO'] + totais_revisao['SUBSTITUIDO']}", "", "Últimas revisões:"]
+    linhas.extend(f"- #{item['id']} [{item['status_revisao']}] {item['disciplina'] or 'Sem disciplina'} / {item['area'] or 'Sem área'} — {item['nome_arquivo_original']}" for item in ultimas)
+    if not ultimas:
+        linhas.append("- Nenhuma revisão cadastrada.")
+    linhas.extend(["", "Governança:", "Consulta documental. Nenhum arquivo foi substituído, nenhum projeto foi liberado para campo, nenhum RDO, cronograma, OpenProject ou RPA foi alterado."])
+    return serializar_json_seguro({"ok": True, "mvp": "0.8A", "obra_codigo": payload.obra_codigo, "totais_por_status_revisao": totais_revisao, "totais_por_status_vigencia": totais_vigencia, "revisoes_recebidas_para_analise": grupos["RECEBIDO_PARA_ANALISE"], "revisoes_em_analise": grupos["EM_ANALISE_TECNICA"], "revisoes_aprovadas_como_vigente": grupos["APROVADO_COMO_VIGENTE"], "revisoes_rejeitadas": grupos["REJEITADO"], "ultimas_revisoes_cadastradas": ultimas, "resposta_telegram": "\n".join(linhas), "flags_seguranca": dict(AGENTE_008_SEGURANCA_CONTROLE_DOCUMENTAL), **AGENTE_008_SEGURANCA_CONTROLE_DOCUMENTAL})
+
+
+def _importar_revisoes_documentais(cur, payload: GestaoOperacionalImportarRevisoesDocumentaisRequest) -> dict[str, Any]:
+    cur.execute("SELECT to_regclass('public.documentos_minio_obra')")
+    if cur.fetchone()[0] is None:
+        return serializar_json_seguro({"ok": True, "mvp": "0.8A", "obra_codigo": payload.obra_codigo, "encontrados": 0, "registrados": 0, "ignorados_por_duplicidade": 0, "revisoes_documentais_ids": [], "resposta_telegram": f"📥 Importação documental — {payload.obra_codigo}\nNenhum índice documentos_minio_obra está disponível; nenhum registro foi criado.", "flags_seguranca": dict(AGENTE_008_SEGURANCA_CONTROLE_DOCUMENTAL), **AGENTE_008_SEGURANCA_CONTROLE_DOCUMENTAL})
+    cur.execute("""SELECT id, bucket, object_key, nome_arquivo, pasta_origem, disciplina_original, categoria_documental
+                   FROM documentos_minio_obra WHERE obra_codigo = %(obra_codigo)s AND bucket = %(bucket)s
+                     AND object_key LIKE %(prefixo_like)s ORDER BY criado_em, id LIMIT %(limite_itens)s""",
+                {**payload.model_dump(), "prefixo_like": payload.prefixo + "%"})
+    documentos = cur.fetchall()
+    registrados = 0
+    duplicados = 0
+    ids: list[int] = []
+    for documento in documentos:
+        dados = GestaoOperacionalRegistrarRevisaoDocumentalRequest(obra_codigo=payload.obra_codigo, documento_minio_id=documento[0], bucket=documento[1], object_key=documento[2], nome_arquivo_original=documento[3], disciplina=documento[5], tipo_documento=documento[6] or "PROJETO")
+        cur.execute("SELECT id FROM revisoes_documentais_obra WHERE obra_codigo = %s AND bucket = %s AND object_key = %s", (payload.obra_codigo, documento[1], documento[2]))
+        existente = cur.fetchone()
+        if existente:
+            duplicados += 1
+            continue
+        resultado = _registrar_revisao_documental(cur, dados)
+        registrados += 1
+        ids.append(resultado["revisao_documental_id"])
+    return serializar_json_seguro({"ok": True, "mvp": "0.8A", "obra_codigo": payload.obra_codigo, "encontrados": len(documentos), "registrados": registrados, "ignorados_por_duplicidade": duplicados, "revisoes_documentais_ids": ids, "resposta_telegram": f"📥 Importação documental — {payload.obra_codigo}\nEncontrados: {len(documentos)} | Registrados: {registrados} | Duplicados ignorados: {duplicados}\n\nArquivos mantidos no MinIO e recebidos apenas para análise; nenhuma liberação de campo foi realizada.", "flags_seguranca": dict(AGENTE_008_SEGURANCA_CONTROLE_DOCUMENTAL), **AGENTE_008_SEGURANCA_CONTROLE_DOCUMENTAL})
+
+
 def _periodo_relatorio_semanal(
     data_inicio: date | None, data_fim: date | None,
 ) -> tuple[date, date]:
@@ -7619,6 +7840,38 @@ def criar_acao_operacional(payload: GestaoOperacionalCriarAcaoRequest):
             return _criar_acao_operacional(cur, payload)
 
 
+@app.post("/agentes/gestao-operacional/registrar-revisao-documental")
+def registrar_revisao_documental(payload: GestaoOperacionalRegistrarRevisaoDocumentalRequest):
+    try:
+        with get_db_connection() as conn:
+            with conn.cursor() as cur:
+                return _registrar_revisao_documental(cur, payload)
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=409 if "uq_revisoes_documentais_objeto_minio" in str(exc) else 500, detail={"message": "Erro ao registrar revisão documental.", "error": _texto_curto(exc, 200)})
+
+
+@app.post("/agentes/gestao-operacional/revisoes-documentais")
+def revisoes_documentais(payload: GestaoOperacionalRevisoesDocumentaisRequest):
+    try:
+        with get_db_connection() as conn:
+            with conn.cursor() as cur:
+                return _listar_revisoes_documentais(cur, payload)
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail={"message": "Erro ao consultar revisões documentais.", "error": _texto_curto(exc, 200)})
+
+
+@app.post("/agentes/gestao-operacional/importar-revisoes-documentais-pendentes")
+def importar_revisoes_documentais_pendentes(payload: GestaoOperacionalImportarRevisoesDocumentaisRequest):
+    try:
+        with get_db_connection() as conn:
+            with conn.cursor() as cur:
+                return _importar_revisoes_documentais(cur, payload)
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail={"message": "Erro ao importar revisões documentais pendentes.", "error": _texto_curto(exc, 200)})
+
+
 @app.post("/agentes/gestao-operacional/acoes-operacionais")
 def listar_acoes_operacionais(payload: GestaoOperacionalListarAcoesRequest):
     with get_db_connection() as conn:
@@ -7690,7 +7943,9 @@ def processar_comando_agente_gestao_operacional(
                           'CRIAR_ACAO_OPERACIONAL_OBRA',
                           'LISTAR_ACOES_OPERACIONAIS_OBRA',
                           'ATUALIZAR_ACAO_OPERACIONAL_OBRA',
-                          'DETALHAR_ACAO_OPERACIONAL_OBRA'
+                          'DETALHAR_ACAO_OPERACIONAL_OBRA',
+                          'CONSULTAR_REVISOES_DOCUMENTAIS_OBRA',
+                          'IMPORTAR_REVISOES_DOCUMENTAIS_PENDENTES_OBRA'
                       )
                       AND ce.status = 'PENDENTE'
                       AND (%(id_comando)s::uuid IS NULL OR ce.id_comando = %(id_comando)s::uuid)
@@ -8048,6 +8303,24 @@ def processar_comando_agente_gestao_operacional(
                     resultado = _detalhar_acao_operacional(
                         cur, GestaoOperacionalDetalheAcaoRequest(**dados_detalhe)
                     )
+                elif comando["tipo_comando"] == "CONSULTAR_REVISOES_DOCUMENTAIS_OBRA":
+                    dados_revisoes = {**(comando["payload_comando"] or {}), "obra_codigo": comando["obra_codigo"]}
+                    try:
+                        with conn.transaction():
+                            resultado = _listar_revisoes_documentais(
+                                cur, GestaoOperacionalRevisoesDocumentaisRequest(**dados_revisoes)
+                            )
+                    except Exception as exc:
+                        resultado = {"ok": False, "erro_controlado": _texto_curto(exc), "resposta_telegram": "Não foi possível consultar as revisões documentais. Nenhuma alteração externa foi realizada.", "flags_seguranca": dict(AGENTE_008_SEGURANCA_CONTROLE_DOCUMENTAL), **AGENTE_008_SEGURANCA_CONTROLE_DOCUMENTAL}
+                elif comando["tipo_comando"] == "IMPORTAR_REVISOES_DOCUMENTAIS_PENDENTES_OBRA":
+                    dados_importacao = {**(comando["payload_comando"] or {}), "obra_codigo": comando["obra_codigo"]}
+                    try:
+                        with conn.transaction():
+                            resultado = _importar_revisoes_documentais(
+                                cur, GestaoOperacionalImportarRevisoesDocumentaisRequest(**dados_importacao)
+                            )
+                    except Exception as exc:
+                        resultado = {"ok": False, "erro_controlado": _texto_curto(exc), "resposta_telegram": "Não foi possível importar as revisões documentais pendentes. Nenhum arquivo foi alterado.", "flags_seguranca": dict(AGENTE_008_SEGURANCA_CONTROLE_DOCUMENTAL), **AGENTE_008_SEGURANCA_CONTROLE_DOCUMENTAL}
                 else:
                     resultado = _resultado_consulta_documentos_classificados(
                         cur, comando["obra_codigo"], comando["payload_comando"]
@@ -8066,6 +8339,8 @@ def processar_comando_agente_gestao_operacional(
                         "GERAR_PDF_RELATORIO_SEMANAL_EXECUTIVO_OBRA",
                         "APROVAR_PDF_RELATORIO_SEMANAL_EXECUTIVO_OBRA",
                         "SOLICITAR_ENVIO_RELATORIO_SEMANAL_EXECUTIVO_OBRA",
+                        "CONSULTAR_REVISOES_DOCUMENTAIS_OBRA",
+                        "IMPORTAR_REVISOES_DOCUMENTAIS_PENDENTES_OBRA",
                     }
                     and resultado.get("ok") is False
                     else "CONCLUIDO"
@@ -8148,10 +8423,17 @@ def processar_comando_agente_gestao_operacional(
         "ok": True,
         "agente": "AGENTE_008_GESTAO_OPERACIONAL_OBRA",
         "mvp": (
-            "0.7L"
-            if comando["tipo_comando"]
-            == "SOLICITAR_ENVIO_RELATORIO_SEMANAL_EXECUTIVO_OBRA"
-            else "0.7K"
+            "0.8A"
+            if comando["tipo_comando"] in {
+                "CONSULTAR_REVISOES_DOCUMENTAIS_OBRA",
+                "IMPORTAR_REVISOES_DOCUMENTAIS_PENDENTES_OBRA",
+            }
+            else (
+                "0.7L"
+                if comando["tipo_comando"]
+                == "SOLICITAR_ENVIO_RELATORIO_SEMANAL_EXECUTIVO_OBRA"
+                else "0.7K"
+            )
         ),
         "status_comando": status_resultado,
         "id_comando": str(comando["id_comando"]),
@@ -8374,6 +8656,8 @@ async def receber_entrada_telegram(
         "LISTAR_ACOES_OPERACIONAIS_OBRA",
         "ATUALIZAR_ACAO_OPERACIONAL_OBRA",
         "DETALHAR_ACAO_OPERACIONAL_OBRA",
+        "CONSULTAR_REVISOES_DOCUMENTAIS_OBRA",
+        "IMPORTAR_REVISOES_DOCUMENTAIS_PENDENTES_OBRA",
     }
     obra_codigo = payload.obra_codigo or "OBRA-CAIO"
     normalized = {
@@ -9024,6 +9308,20 @@ async def receber_entrada_telegram(
                             "obra_codigo": obra_codigo,
                             **extrair_detalhe_acao_telegram(normalized["conteudo"]),
                             **AGENTE_008_SEGURANCA_CONSULTA,
+                        }
+                    elif classificacao["tipo_comando"] == "CONSULTAR_REVISOES_DOCUMENTAIS_OBRA":
+                        payload_comando = {
+                            "obra_codigo": obra_codigo, "area": None, "disciplina": None,
+                            "status_revisao": None, "status_vigencia": None,
+                            "limite_itens": 20,
+                            **AGENTE_008_SEGURANCA_CONTROLE_DOCUMENTAL,
+                        }
+                    elif classificacao["tipo_comando"] == "IMPORTAR_REVISOES_DOCUMENTAIS_PENDENTES_OBRA":
+                        payload_comando = {
+                            "obra_codigo": obra_codigo, "bucket": "obra-caio",
+                            "prefixo": "01_projetos/00_recebidos_para_analise/",
+                            "limite_itens": 50,
+                            **AGENTE_008_SEGURANCA_CONTROLE_DOCUMENTAL,
                         }
 
                 cur.execute(
