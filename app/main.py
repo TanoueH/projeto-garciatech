@@ -300,6 +300,7 @@ class GestaoOperacionalRelatorioSemanalRequest(BaseModel):
     data_fim: date | None = None
     limite_itens: int = Field(default=10, ge=1, le=50)
     salvar_relatorio: bool = True
+    incluir_revisoes_documentais: bool = True
 
 
 class GestaoOperacionalExportarRelatorioSemanalRequest(BaseModel):
@@ -311,6 +312,7 @@ class GestaoOperacionalExportarRelatorioSemanalRequest(BaseModel):
     formato: str = "MARKDOWN"
     limite_itens: int = Field(default=10, ge=1, le=50)
     salvar_exportacao: bool = True
+    incluir_revisoes_documentais: bool = True
 
 
 class GestaoOperacionalGerarPdfRelatorioSemanalRequest(BaseModel):
@@ -323,6 +325,7 @@ class GestaoOperacionalGerarPdfRelatorioSemanalRequest(BaseModel):
     limite_itens: int = Field(default=10, ge=1, le=50)
     salvar_pdf: bool = True
     armazenar_minio: bool = True
+    incluir_revisoes_documentais: bool = True
 
 
 class GestaoOperacionalAprovarPdfRelatorioSemanalRequest(BaseModel):
@@ -734,6 +737,8 @@ def classificar_intencao_executiva(conteudo: Optional[str]) -> dict[str, Any]:
         "balanco semanal da obra", "o que aconteceu na obra esta semana",
         "o que aconteceu na obra essa semana", "relatorio semanal executivo",
         "relatorio semanal do refeitorio", "balanco semanal do refeitorio",
+        "relatorio semanal com revisoes documentais",
+        "relatorio semanal com documentos liberados",
     }
     comandos_exportar_relatorio_semanal = {
         "exportar relatorio semanal da obra",
@@ -1329,6 +1334,9 @@ def table_exists(conn, qualified_name: str) -> bool:
 
 AGENTE_008_SEGURANCA_CONSULTA = {
     "modo": "CONSULTA",
+    "altera_revisoes_documentais": False,
+    "libera_execucao_campo": False,
+    "cria_ordem_servico": False,
     "altera_cronograma": False,
     "executa_rpa": False,
     "sincroniza_openproject": False,
@@ -1337,6 +1345,8 @@ AGENTE_008_SEGURANCA_CONSULTA = {
     "envia_arquivos": False,
     "gera_links_publicos": False,
     "altera_minio": False,
+    "move_arquivos_minio": False,
+    "apaga_arquivos_minio": False,
     "aprova_execucao_automaticamente": False,
     "linguagem": "CONSULTIVA",
 }
@@ -6371,6 +6381,7 @@ def _data_operacional(valor: Any) -> date | None:
 def _gerar_relatorio_semanal_executivo(
     cur, obra_codigo: str, area: Optional[str], data_inicio: date,
     data_fim: date, limite_itens: int, salvar_relatorio: bool,
+    incluir_revisoes_documentais: bool = True,
 ) -> dict[str, Any]:
     fontes_indisponiveis: list[str] = []
 
@@ -6418,6 +6429,24 @@ def _gerar_relatorio_semanal_executivo(
     atividades = ler("atividades_cronograma", [
         "id", "codigo_area", "area", "frente_servico", "descricao", "status_atividade",
     ])
+    revisoes_documentais = ler("revisoes_documentais_obra", [
+        "id", "nome_arquivo_original", "disciplina", "area", "codigo_documento",
+        "revisao_detectada", "status_revisao", "status_vigencia", "criado_em",
+        "decisao_tecnica_em", "aprovado_por", "aprovado_em", "rejeitado_em",
+        "motivo_decisao", "observacao_decisao", "liberado_para_campo",
+        "liberado_para_campo_por", "liberado_para_campo_em", "liberacao_campo_status",
+        "liberacao_campo_instrucoes", "liberacao_campo_decisao_em",
+    ]) if incluir_revisoes_documentais else []
+    aprovacoes_revisoes = ler("aprovacoes_revisoes_documentais_obra", [
+        "id", "revisao_documental_id", "area", "decisao", "status_revisao_resultante",
+        "status_vigencia_resultante", "aprovado", "rejeitado", "ajustes_solicitados",
+        "motivo", "observacao", "decisor_nome", "criado_em",
+    ]) if incluir_revisoes_documentais else []
+    liberacoes_revisoes = ler("liberacoes_revisoes_documentais_campo_obra", [
+        "id", "revisao_documental_id", "area", "decisao", "status_liberacao_resultante",
+        "liberado_para_campo", "liberacao_suspensa", "liberacao_revogada",
+        "instrucoes_campo", "decisor_nome", "criado_em",
+    ]) if incluir_revisoes_documentais else []
 
     filtro_area = normalizar_texto_comparacao(area).replace(" ", "_") if area else None
     atividade_area = {
@@ -6461,6 +6490,9 @@ def _gerar_relatorio_semanal_executivo(
         comandos = [item for item in comandos if area_comando(item) in {None, filtro_area}]
         pendencias = [item for item in pendencias if area_item(item) == filtro_area]
         restricoes = [item for item in restricoes if area_item(item, usar_atividade=True) == filtro_area]
+        revisoes_documentais = [item for item in revisoes_documentais if area_item(item) == filtro_area]
+        aprovacoes_revisoes = [item for item in aprovacoes_revisoes if area_item(item) == filtro_area]
+        liberacoes_revisoes = [item for item in liberacoes_revisoes if area_item(item) == filtro_area]
 
     def no_periodo(valor: Any) -> bool:
         data_valor = _data_operacional(valor)
@@ -6481,6 +6513,160 @@ def _gerar_relatorio_semanal_executivo(
             )
         except (TypeError, ValueError):
             return False
+
+    revisoes_recebidas = [
+        item for item in revisoes_documentais if no_periodo(item.get("criado_em"))
+    ]
+    revisoes_em_analise = [
+        item for item in revisoes_documentais
+        if status(item, "status_revisao") in {"RECEBIDO_PARA_ANALISE", "EM_ANALISE_TECNICA"}
+    ]
+    aprovacoes_periodo = [item for item in aprovacoes_revisoes if no_periodo(item.get("criado_em"))]
+    liberacoes_periodo = [item for item in liberacoes_revisoes if no_periodo(item.get("criado_em"))]
+    revisoes_aprovadas_periodo = [
+        item for item in revisoes_documentais
+        if status(item, "status_revisao") == "APROVADO_COMO_VIGENTE"
+        and status(item, "status_vigencia") == "VIGENTE"
+        and no_periodo(item.get("aprovado_em") or item.get("decisao_tecnica_em"))
+    ]
+    rejeitadas_periodo_ids = {
+        item.get("revisao_documental_id") for item in aprovacoes_periodo
+        if item.get("rejeitado") is True or status(item, "decisao", "status_revisao_resultante") == "REJEITADO"
+    }
+    ajustes_periodo_ids = {
+        item.get("revisao_documental_id") for item in aprovacoes_periodo
+        if item.get("ajustes_solicitados") is True or status(item, "decisao", "status_revisao_resultante") == "AJUSTES_SOLICITADOS"
+    }
+    rejeitadas_periodo = [
+        item for item in revisoes_documentais
+        if item.get("id") in rejeitadas_periodo_ids
+        or (status(item, "status_revisao") == "REJEITADO"
+            and no_periodo(item.get("rejeitado_em") or item.get("decisao_tecnica_em")))
+    ]
+    ajustes_periodo = [
+        item for item in revisoes_documentais
+        if item.get("id") in ajustes_periodo_ids
+        or (status(item, "status_revisao") == "AJUSTES_SOLICITADOS"
+            and no_periodo(item.get("decisao_tecnica_em")))
+    ]
+    liberadas_periodo_ids = {
+        item.get("revisao_documental_id") for item in liberacoes_periodo
+        if item.get("liberado_para_campo") is True
+        or status(item, "decisao", "status_liberacao_resultante") in {
+            "LIBERAR_PARA_CAMPO", "LIBERADO_PARA_USO_DOCUMENTAL_EM_CAMPO",
+        }
+    }
+    revisoes_liberadas_periodo = [
+        item for item in revisoes_documentais
+        if item.get("id") in liberadas_periodo_ids
+        or no_periodo(item.get("liberado_para_campo_em"))
+    ]
+    revisoes_liberadas_ativas = [
+        item for item in revisoes_documentais
+        if item.get("liberado_para_campo") is True
+        and status(item, "liberacao_campo_status") == "LIBERADO_PARA_USO_DOCUMENTAL_EM_CAMPO"
+    ]
+    suspensas_periodo = [
+        item for item in liberacoes_periodo
+        if item.get("liberacao_suspensa") is True
+        or status(item, "decisao", "status_liberacao_resultante") in {"SUSPENDER_LIBERACAO_CAMPO", "SUSPENSA"}
+    ]
+    revogadas_periodo = [
+        item for item in liberacoes_periodo
+        if item.get("liberacao_revogada") is True
+        or status(item, "decisao", "status_liberacao_resultante") in {"REVOGAR_LIBERACAO_CAMPO", "REVOGADA"}
+    ]
+    suspensas_periodo_ids = {
+        item.get("revisao_documental_id") for item in suspensas_periodo
+        if item.get("revisao_documental_id") is not None
+    }
+    revogadas_periodo_ids = {
+        item.get("revisao_documental_id") for item in revogadas_periodo
+        if item.get("revisao_documental_id") is not None
+    }
+    suspensas_periodo_ids.update(
+        item.get("id") for item in revisoes_documentais
+        if status(item, "liberacao_campo_status") == "SUSPENSA"
+        and no_periodo(item.get("liberacao_campo_decisao_em"))
+    )
+    revogadas_periodo_ids.update(
+        item.get("id") for item in revisoes_documentais
+        if status(item, "liberacao_campo_status") == "REVOGADA"
+        and no_periodo(item.get("liberacao_campo_decisao_em"))
+    )
+    revisoes_nao_vigentes = [
+        item for item in revisoes_documentais if status(item, "status_vigencia") != "VIGENTE"
+    ]
+    vigentes_nao_liberadas = [
+        item for item in revisoes_documentais
+        if status(item, "status_vigencia") == "VIGENTE"
+        and item.get("liberado_para_campo") is not True
+    ]
+    aprovacao_por_revisao = {
+        item.get("revisao_documental_id"): item
+        for item in aprovacoes_periodo if item.get("revisao_documental_id") is not None
+    }
+    liberacao_por_revisao = {
+        item.get("revisao_documental_id"): item
+        for item in liberacoes_periodo if item.get("revisao_documental_id") is not None
+    }
+
+    def resumir_revisao_recebida(item: dict[str, Any]) -> dict[str, Any]:
+        return {campo: item.get(campo) for campo in (
+            "id", "nome_arquivo_original", "disciplina", "area", "codigo_documento",
+            "revisao_detectada", "status_revisao", "status_vigencia", "criado_em",
+        )}
+
+    def resumir_revisao_aprovada(item: dict[str, Any]) -> dict[str, Any]:
+        aprovacao = aprovacao_por_revisao.get(item.get("id"), {})
+        resumo = {campo: item.get(campo) for campo in (
+            "id", "nome_arquivo_original", "disciplina", "area", "codigo_documento",
+            "revisao_detectada", "aprovado_por", "aprovado_em",
+        )}
+        resumo["aprovado_por"] = resumo["aprovado_por"] or aprovacao.get("decisor_nome")
+        resumo["aprovado_em"] = resumo["aprovado_em"] or aprovacao.get("criado_em")
+        return resumo
+
+    def resumir_revisao_liberada(item: dict[str, Any]) -> dict[str, Any]:
+        liberacao = liberacao_por_revisao.get(item.get("id"), {})
+        resumo = {campo: item.get(campo) for campo in (
+            "id", "nome_arquivo_original", "disciplina", "area", "codigo_documento",
+            "revisao_detectada", "liberado_para_campo_por", "liberado_para_campo_em",
+            "liberacao_campo_status", "liberacao_campo_instrucoes",
+        )}
+        resumo["liberado_para_campo_por"] = (
+            resumo["liberado_para_campo_por"] or liberacao.get("decisor_nome")
+        )
+        resumo["liberado_para_campo_em"] = (
+            resumo["liberado_para_campo_em"] or liberacao.get("criado_em")
+        )
+        resumo["liberacao_campo_status"] = (
+            resumo["liberacao_campo_status"] or liberacao.get("status_liberacao_resultante")
+        )
+        resumo["liberacao_campo_instrucoes"] = (
+            resumo["liberacao_campo_instrucoes"] or liberacao.get("instrucoes_campo")
+        )
+        return resumo
+
+    def resumir_revisao_bloqueada(item: dict[str, Any]) -> dict[str, Any]:
+        return {campo: item.get(campo) for campo in (
+            "id", "nome_arquivo_original", "disciplina", "area", "codigo_documento",
+            "revisao_detectada", "status_revisao", "status_vigencia",
+            "motivo_decisao", "observacao_decisao",
+        )}
+
+    def unicas(itens: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        resultado_unico: list[dict[str, Any]] = []
+        ids_vistos: set[Any] = set()
+        for item in itens:
+            if item.get("id") not in ids_vistos:
+                ids_vistos.add(item.get("id"))
+                resultado_unico.append(item)
+        return resultado_unico
+
+    revisoes_bloqueadas = unicas(
+        revisoes_em_analise + ajustes_periodo + rejeitadas_periodo + vigentes_nao_liberadas
+    )
 
     status_encerrados = {
         "CONCLUIDO", "CONCLUIDA", "CANCELADO", "CANCELADA", "RESOLVIDO", "RESOLVIDA",
@@ -6577,10 +6763,12 @@ def _gerar_relatorio_semanal_executivo(
         len(sem_revisao_docs) + len(baixa_confianca_docs)
         >= max(5, (len(classificacoes) + 4) // 5)
     )
-    if altas_criticas or obsoletos:
+    if suspensas_periodo_ids or revogadas_periodo_ids or altas_criticas or obsoletos:
         status_executivo = "BLOQUEIO_POTENCIAL"
-    elif muitos_incertos:
+    elif rejeitadas_periodo or ajustes_periodo or muitos_incertos:
         status_executivo = "REQUER_VALIDACAO_TECNICA"
+    elif vigentes_nao_liberadas:
+        status_executivo = "ATENCAO_DOCUMENTAL"
     elif nao_encerradas or pendencias_abertas or restricoes_abertas or fontes_indisponiveis:
         status_executivo = "REQUER_ATENCAO"
     else:
@@ -6682,14 +6870,27 @@ def _gerar_relatorio_semanal_executivo(
         *([f"- #{item.get('id')} [{status(item, 'prioridade') or 'N/I'}] {_texto_curto(item.get('titulo') or item.get('descricao') or 'Ação sem título', 90)}" for item in acoes_telegram] or ["- Nenhuma ação aberta identificada."]),
         "", "Decisões pendentes:", *([f"- {item}" for item in decisoes] or ["- Nenhuma decisão pendente identificada nas fontes disponíveis."]),
         "", "Recomendações para a próxima semana:", *[f"- {item}" for item in recomendacoes],
-        "", "Modo: CONSULTA", "Nenhum cronograma, RDO, MinIO ou OpenProject foi alterado.",
-        "Este relatório não confirma liberação definitiva da obra ou de qualquer frente.",
+        "", "Controle documental:",
+        f"- Revisões recebidas: {len(revisoes_recebidas)}",
+        f"- Vigentes aprovadas: {len(revisoes_aprovadas_periodo)}",
+        f"- Liberadas para campo: {len(revisoes_liberadas_periodo)}",
+        f"- Pendentes/bloqueadas: {len(revisoes_bloqueadas)}",
+        f"- Suspensas/revogadas: {len(suspensas_periodo_ids) + len(revogadas_periodo_ids)}",
+        "", "Revisões relevantes:",
+        *([f"- #{item.get('id')} [{status(item, 'status_revisao') or 'N/I'}] "
+           f"{item.get('disciplina') or 'N/I'} / {item.get('area') or 'N/I'} — "
+           f"{_texto_curto(item.get('nome_arquivo_original'), 55)}"
+           for item in (revisoes_liberadas_periodo + ajustes_periodo + rejeitadas_periodo + vigentes_nao_liberadas)[:5]]
+          or ["- Nenhuma revisão relevante identificada."]),
+        "", "Governança:",
+        "Relatório consultivo. Nenhuma revisão foi alterada, nenhum arquivo foi movido, "
+        "nenhum projeto foi liberado automaticamente, nenhum RDO, cronograma, OpenProject ou RPA foi alterado.",
     ]
 
     limite = max(1, min(limite_itens, 50))
     resultado = {
         "ok": True,
-        "mvp": "0.7H",
+        "mvp": "0.8D",
         "tipo_relatorio": "RELATORIO_SEMANAL_EXECUTIVO",
         "obra_codigo": obra_codigo,
         "area": area,
@@ -6716,6 +6917,31 @@ def _gerar_relatorio_semanal_executivo(
             "documentos_baixa_confianca": len(baixa_confianca_docs),
             "alteracoes_documentais": len(alteracoes_documentais), "as_built": len(as_built),
         },
+        "controle_revisoes_documentais": {
+            "revisoes_recebidas_periodo": len(revisoes_recebidas),
+            "revisoes_em_analise": len(revisoes_em_analise),
+            "revisoes_aprovadas_vigentes_periodo": len(revisoes_aprovadas_periodo),
+            "revisoes_rejeitadas_periodo": len(rejeitadas_periodo),
+            "revisoes_com_ajustes_solicitados": len(ajustes_periodo),
+            "revisoes_liberadas_campo_periodo": len(revisoes_liberadas_periodo),
+            "revisoes_liberadas_campo_ativas": len(revisoes_liberadas_ativas),
+            "liberacoes_suspensas_periodo": len(suspensas_periodo_ids),
+            "liberacoes_revogadas_periodo": len(revogadas_periodo_ids),
+            "revisoes_nao_vigentes": len(revisoes_nao_vigentes),
+            "revisoes_vigentes_nao_liberadas_campo": len(vigentes_nao_liberadas),
+        } if incluir_revisoes_documentais else None,
+        "revisoes_recebidas_periodo": [
+            resumir_revisao_recebida(item) for item in revisoes_recebidas[:limite]
+        ],
+        "revisoes_aprovadas_vigentes_periodo": [
+            resumir_revisao_aprovada(item) for item in revisoes_aprovadas_periodo[:limite]
+        ],
+        "revisoes_liberadas_campo_periodo": [
+            resumir_revisao_liberada(item) for item in revisoes_liberadas_periodo[:limite]
+        ],
+        "revisoes_bloqueadas_ou_pendentes": [
+            resumir_revisao_bloqueada(item) for item in revisoes_bloqueadas[:limite]
+        ],
         "documentos_criticos": [],
         "briefing_diario": {
             "total_briefings_enviados": len(briefings_periodo),
@@ -6725,7 +6951,12 @@ def _gerar_relatorio_semanal_executivo(
         "recomendacoes_proxima_semana": recomendacoes,
         "resposta_telegram": "\n".join(linhas),
         "fontes_indisponiveis": fontes_indisponiveis,
-        "flags_seguranca": dict(AGENTE_008_SEGURANCA_CONSULTA),
+        "fontes_parciais": fontes_indisponiveis,
+        "inclui_revisoes_documentais": incluir_revisoes_documentais,
+        "flags_seguranca": {
+            **AGENTE_008_SEGURANCA_CONSULTA,
+            "inclui_revisoes_documentais": incluir_revisoes_documentais,
+        },
         **AGENTE_008_SEGURANCA_CONSULTA,
     }
     # Reconstrói a lista crítica sem depender de hashabilidade dos registros de origem.
@@ -6781,6 +7012,7 @@ def _carregar_ou_gerar_relatorio_para_exportacao(
     data_fim: date | None,
     relatorio_semanal_id: int | None,
     limite_itens: int,
+    incluir_revisoes_documentais: bool = True,
 ) -> tuple[dict[str, Any], int | None, bool]:
     if relatorio_semanal_id is not None:
         cur.execute(
@@ -6811,6 +7043,7 @@ def _carregar_ou_gerar_relatorio_para_exportacao(
     inicio, fim = _periodo_relatorio_semanal(data_inicio, data_fim)
     relatorio = _gerar_relatorio_semanal_executivo(
         cur, obra_codigo, area, inicio, fim, limite_itens, False,
+        incluir_revisoes_documentais,
     )
     return serializar_json_seguro(relatorio), None, False
 
@@ -6845,6 +7078,57 @@ def _montar_markdown_relatorio_semanal(relatorio: dict[str, Any]) -> tuple[str, 
     acoes_concluidas = relatorio.get("acoes_concluidas_no_periodo") or []
     decisoes = relatorio.get("decisoes_pendentes") or []
     recomendacoes = relatorio.get("recomendacoes_proxima_semana") or []
+    controle_revisoes = relatorio.get("controle_revisoes_documentais")
+    revisoes_liberadas = relatorio.get("revisoes_liberadas_campo_periodo") or []
+    revisoes_pendentes = relatorio.get("revisoes_bloqueadas_ou_pendentes") or []
+
+    secao_revisoes: list[str] = []
+    if isinstance(controle_revisoes, dict):
+        suspensas_revogadas = (
+            controle_revisoes.get("liberacoes_suspensas_periodo", 0)
+            + controle_revisoes.get("liberacoes_revogadas_periodo", 0)
+        )
+        secao_revisoes = [
+            "", "---", "", "## Controle técnico-documental da semana", "",
+            "| Indicador | Valor |", "|---|---:|",
+            f"| Revisões recebidas no período | {controle_revisoes.get('revisoes_recebidas_periodo', 0)} |",
+            f"| Revisões em análise | {controle_revisoes.get('revisoes_em_analise', 0)} |",
+            f"| Revisões aprovadas como vigente | {controle_revisoes.get('revisoes_aprovadas_vigentes_periodo', 0)} |",
+            f"| Revisões liberadas para campo | {controle_revisoes.get('revisoes_liberadas_campo_periodo', 0)} |",
+            f"| Revisões vigentes ainda não liberadas para campo | {controle_revisoes.get('revisoes_vigentes_nao_liberadas_campo', 0)} |",
+            f"| Revisões com ajustes solicitados | {controle_revisoes.get('revisoes_com_ajustes_solicitados', 0)} |",
+            f"| Revisões rejeitadas | {controle_revisoes.get('revisoes_rejeitadas_periodo', 0)} |",
+            f"| Liberações suspensas/revogadas | {suspensas_revogadas} |",
+            "", "### Revisões liberadas para uso documental em campo", "",
+        ]
+        for item in revisoes_liberadas:
+            secao_revisoes.extend([
+                f"- #{item.get('id')} [{_texto_markdown(item.get('disciplina'), 'N/I')} / "
+                f"{_texto_markdown(item.get('area'), 'N/I')}] "
+                f"{_texto_markdown(item.get('codigo_documento'), 'Sem código')} — "
+                f"{_texto_markdown(item.get('nome_arquivo_original'), 'Arquivo não informado')}",
+                f"  - Revisão: {_texto_markdown(item.get('revisao_detectada'), 'N/I')}",
+                f"  - Liberação: {_formatar_data_br(item.get('liberado_para_campo_em'))}",
+                f"  - Instruções: {_texto_markdown(item.get('liberacao_campo_instrucoes'))}",
+            ])
+        if not revisoes_liberadas:
+            secao_revisoes.append("- Nenhuma revisão liberada no período.")
+        secao_revisoes.extend(["", "### Revisões pendentes, bloqueadas ou em ajuste", ""])
+        for item in revisoes_pendentes:
+            motivo = item.get("motivo_decisao") or item.get("observacao_decisao")
+            secao_revisoes.extend([
+                f"- #{item.get('id')} [{_texto_markdown(item.get('status_revisao'), 'N/I')}] "
+                f"{_texto_markdown(item.get('codigo_documento'), 'Sem código')} — "
+                f"{_texto_markdown(item.get('nome_arquivo_original'), 'Arquivo não informado')}",
+                f"  - Motivo/observação: {_texto_markdown(motivo)}",
+            ])
+        if not revisoes_pendentes:
+            secao_revisoes.append("- Nenhuma revisão pendente ou bloqueada identificada.")
+        secao_revisoes.extend([
+            "", "A liberação para campo indicada neste relatório corresponde apenas ao uso "
+            "documental controlado da revisão. Ela não cria ordem de serviço, não altera "
+            "cronograma, não altera RDO e não autoriza execução automática de serviços.",
+        ])
 
     linhas = [
         f"# Relatório Semanal Executivo — {obra_codigo}",
@@ -6913,6 +7197,7 @@ def _montar_markdown_relatorio_semanal(relatorio: dict[str, Any]) -> tuple[str, 
         f"| Documentos com baixa confiança | {indicadores_documentais.get('documentos_baixa_confianca', 0)} |",
         f"| Alterações documentais | {indicadores_documentais.get('alteracoes_documentais', 0)} |",
         f"| As Built | {indicadores_documentais.get('as_built', 0)} |",
+        *secao_revisoes,
         "",
         "---",
         "",
@@ -6957,11 +7242,12 @@ def _exportar_relatorio_semanal_controlado(
         payload.data_fim,
         payload.relatorio_semanal_id,
         payload.limite_itens,
+        payload.incluir_revisoes_documentais,
     )
     conteudo_markdown, resumo_executivo = _montar_markdown_relatorio_semanal(relatorio)
     titulo = f"Relatório Semanal Executivo — {relatorio['obra_codigo']}"
     metadados = serializar_json_seguro({
-        "mvp": "0.7I",
+        "mvp": "0.8D",
         "relatorio_reutilizado": reutilizou_relatorio,
         "flags_seguranca": dict(AGENTE_008_SEGURANCA_EXPORTACAO),
     })
@@ -7019,7 +7305,7 @@ def _exportar_relatorio_semanal_controlado(
 
     resultado = {
         "ok": True,
-        "mvp": "0.7I",
+        "mvp": "0.8D",
         "tipo_exportacao": "RELATORIO_SEMANAL_EXECUTIVO",
         "exportacao_id": exportacao_id,
         "relatorio_semanal_id": relatorio_id,
@@ -7035,7 +7321,15 @@ def _exportar_relatorio_semanal_controlado(
         "resumo_executivo": resumo_executivo,
         "resposta_telegram": resposta_telegram,
         "salvar_exportacao": payload.salvar_exportacao,
-        "flags_seguranca": dict(AGENTE_008_SEGURANCA_EXPORTACAO),
+        "inclui_revisoes_documentais": bool(
+            relatorio.get("inclui_revisoes_documentais", payload.incluir_revisoes_documentais)
+        ),
+        "flags_seguranca": {
+            **AGENTE_008_SEGURANCA_EXPORTACAO,
+            "inclui_revisoes_documentais": bool(
+                relatorio.get("inclui_revisoes_documentais", payload.incluir_revisoes_documentais)
+            ),
+        },
         **AGENTE_008_SEGURANCA_EXPORTACAO,
     }
     return serializar_json_seguro(resultado)
@@ -7057,6 +7351,7 @@ def _carregar_ou_criar_exportacao_para_pdf(
                 formato="MARKDOWN",
                 limite_itens=payload.limite_itens,
                 salvar_exportacao=True,
+                incluir_revisoes_documentais=payload.incluir_revisoes_documentais,
             ),
         )
         return {
@@ -7338,7 +7633,7 @@ def _gerar_pdf_relatorio_semanal_privado(
                 data=BytesIO(pdf_bytes),
                 length=tamanho_bytes,
                 content_type="application/pdf",
-                metadata={"sha256": sha256, "mvp": "0.7J"},
+                metadata={"sha256": sha256, "mvp": "0.8D"},
             )
             bucket = bucket_pdf
             object_key = object_key_pdf
@@ -7354,9 +7649,10 @@ def _gerar_pdf_relatorio_semanal_privado(
     flags_seguranca = {
         **AGENTE_008_SEGURANCA_PDF,
         "altera_minio": alterou_minio,
+        "inclui_revisoes_documentais": payload.incluir_revisoes_documentais,
     }
     metadados = serializar_json_seguro({
-        "mvp": "0.7J",
+        "mvp": "0.8D",
         "tipo": "PDF_PRIVADO_REVISAO",
         "origem": "RELATORIO_SEMANAL_EXECUTIVO",
         "sem_link_publico": True,
@@ -7432,7 +7728,7 @@ def _gerar_pdf_relatorio_semanal_privado(
     ])
     resultado = {
         "ok": True,
-        "mvp": "0.7J",
+        "mvp": "0.8D",
         "pdf_id": pdf_id,
         "exportacao_relatorio_id": exportacao["id"],
         "relatorio_semanal_id": exportacao.get("relatorio_semanal_id"),
@@ -7452,6 +7748,7 @@ def _gerar_pdf_relatorio_semanal_privado(
         "metadados": metadados,
         "exportacao_criada": exportacao["exportacao_criada"],
         "aviso_minio": erro_minio,
+        "inclui_revisoes_documentais": payload.incluir_revisoes_documentais,
         "resposta_telegram": resposta_telegram,
         "flags_seguranca": dict(flags_seguranca),
         **flags_seguranca,
@@ -7876,6 +8173,7 @@ def relatorio_semanal_executivo(payload: GestaoOperacionalRelatorioSemanalReques
                 return _gerar_relatorio_semanal_executivo(
                     cur, payload.obra_codigo, payload.area, data_inicio, data_fim,
                     payload.limite_itens, payload.salvar_relatorio,
+                    payload.incluir_revisoes_documentais,
                 )
     except HTTPException:
         raise
@@ -8573,6 +8871,7 @@ def processar_comando_agente_gestao_operacional(
                             data_inicio, data_fim,
                             max(1, min(int(payload_relatorio_semanal.get("limite_itens", 10)), 50)),
                             bool(payload_relatorio_semanal.get("salvar_relatorio", True)),
+                            bool(payload_relatorio_semanal.get("incluir_revisoes_documentais", True)),
                         )
                     except Exception as exc:
                         resultado = {
@@ -9735,6 +10034,7 @@ async def receber_entrada_telegram(
                             "data_fim": None,
                             "limite_itens": 10,
                             "salvar_relatorio": True,
+                            "incluir_revisoes_documentais": True,
                             **AGENTE_008_SEGURANCA_CONSULTA,
                         }
                     elif classificacao["tipo_comando"] == "EXPORTAR_RELATORIO_SEMANAL_EXECUTIVO_OBRA":
@@ -9747,6 +10047,7 @@ async def receber_entrada_telegram(
                             "formato": "MARKDOWN",
                             "limite_itens": 10,
                             "salvar_exportacao": True,
+                            "incluir_revisoes_documentais": True,
                             **AGENTE_008_SEGURANCA_EXPORTACAO,
                         }
                     elif classificacao["tipo_comando"] == "GERAR_PDF_RELATORIO_SEMANAL_EXECUTIVO_OBRA":
@@ -9760,6 +10061,7 @@ async def receber_entrada_telegram(
                             "limite_itens": 10,
                             "salvar_pdf": True,
                             "armazenar_minio": True,
+                            "incluir_revisoes_documentais": True,
                             **AGENTE_008_SEGURANCA_PDF,
                         }
                     elif classificacao["tipo_comando"] == "APROVAR_PDF_RELATORIO_SEMANAL_EXECUTIVO_OBRA":
