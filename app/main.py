@@ -420,7 +420,7 @@ class GestaoOperacionalRevisoesDocumentaisRequest(BaseModel):
     obra_codigo: str = Field(min_length=1)
     area: str | None = None
     disciplina: str | None = None
-    status_revisao: str | None = Field(default=None, pattern="^(RECEBIDO_PARA_ANALISE|EM_ANALISE_TECNICA|APROVADO_COMO_VIGENTE|REJEITADO|SUBSTITUIDO|OBSOLETO|AS_BUILT)$")
+    status_revisao: str | None = Field(default=None, pattern="^(RECEBIDO_PARA_ANALISE|EM_ANALISE_TECNICA|APROVADO_COMO_VIGENTE|REJEITADO|AJUSTES_SOLICITADOS|SUBSTITUIDO|OBSOLETO|AS_BUILT)$")
     status_vigencia: str | None = Field(default=None, pattern="^(NAO_VIGENTE|VIGENTE|SUBSTITUIDO|OBSOLETO|HISTORICO)$")
     limite_itens: int = Field(default=20, ge=1, le=200)
 
@@ -430,6 +430,18 @@ class GestaoOperacionalImportarRevisoesDocumentaisRequest(BaseModel):
     bucket: str = Field(min_length=1)
     prefixo: str = Field(min_length=1)
     limite_itens: int = Field(default=50, ge=1, le=500)
+
+
+class GestaoOperacionalAprovarRevisaoDocumentalRequest(BaseModel):
+    obra_codigo: str = Field(min_length=1)
+    revisao_documental_id: int = Field(gt=0)
+    decisao: str = Field(pattern="^(APROVAR_COMO_VIGENTE|REJEITAR|SOLICITAR_AJUSTES|MARCAR_EM_ANALISE)$")
+    motivo: str | None = None
+    observacao: str | None = None
+    decisor_nome: str | None = None
+    decisor_telegram_user_id: str | None = None
+    decisor_telegram_username: str | None = None
+    decisor_chat_id: str | None = None
 
 
 def get_db_connection():
@@ -597,6 +609,18 @@ def classificar_intencao_executiva(conteudo: Optional[str]) -> dict[str, Any]:
     ]
     texto_comando = re.sub(r"\s+", " ", texto.strip().rstrip("?.!"))
     texto_comando_normalizado = normalizar_texto_comparacao(texto_comando)
+    decisao_revisao = extrair_decisao_revisao_documental_telegram(conteudo)
+    if decisao_revisao:
+        return {
+            "intencao": "APROVAR_REVISAO_DOCUMENTAL_OBRA",
+            "agente_destino": "AGENTE_008_GESTAO_OPERACIONAL_OBRA",
+            "tipo_comando": "APROVAR_REVISAO_DOCUMENTAL_OBRA",
+            "decisao": decisao_revisao["decisao"],
+            "revisao_documental_id": decisao_revisao["revisao_documental_id"],
+            "requer_aprovacao": False,
+            "confianca": 0.99,
+            "justificativa": "Decisão técnica documental explícita e auditável, sem execução externa.",
+        }
     decisoes_pdf_relatorio = (
         (
             "SOLICITAR_AJUSTES",
@@ -1290,6 +1314,34 @@ AGENTE_008_SEGURANCA_CONTROLE_DOCUMENTAL = {
     "documento_vira_vigente_automaticamente": False,
     "linguagem": "CONSULTIVA",
 }
+
+AGENTE_008_SEGURANCA_APROVACAO_DOCUMENTAL = {
+    **AGENTE_008_SEGURANCA_CONTROLE_DOCUMENTAL,
+    "modo": "APROVACAO_TECNICA_DOCUMENTAL_CONTROLADA",
+    "documento_vira_vigente_apenas_por_decisao_explicita": True,
+}
+
+
+def extrair_decisao_revisao_documental_telegram(conteudo: Optional[str]) -> dict[str, Any]:
+    texto = normalizar_texto_comparacao(conteudo)
+    padroes = (
+        ("SOLICITAR_AJUSTES", r"^(?:solicitar|pedir) ajustes na (?:revisao|documento|projeto)|^corrigir (?:revisao|documento|projeto)"),
+        ("REJEITAR", r"^(?:rejeitar|nao aprovar) (?:a )?(?:revisao|documento|projeto)"),
+        ("MARCAR_EM_ANALISE", r"^(?:marcar (?:a )?revisao .* em analise|colocar (?:a )?revisao .* em analise tecnica|analisar (?:a )?revisao)"),
+        ("APROVAR_COMO_VIGENTE", r"^(?:aprovar (?:a )?(?:revisao|documento|projeto).* como vigente|aprovo (?:a )?revisao|marcar (?:a )?revisao .* como vigente)"),
+    )
+    decisao = next((valor for valor, padrao in padroes if re.search(padrao, texto)), None)
+    if not decisao:
+        return {}
+    identificador = re.search(r"(?:#\s*|\b(?:revisao|documento|projeto)\s+)(\d+)\b", texto)
+    extra = re.search(r"(?:\bmotivo\b|\bporque\b|:)\s*(.+)$", (conteudo or "").strip(), re.IGNORECASE)
+    detalhe = extra.group(1).strip() if extra else None
+    return {
+        "decisao": decisao,
+        "revisao_documental_id": int(identificador.group(1)) if identificador else None,
+        "motivo": detalhe if decisao == "REJEITAR" else None,
+        "observacao": detalhe if decisao in {"SOLICITAR_AJUSTES", "MARCAR_EM_ANALISE"} else None,
+    }
 
 AGENTE_008_SEGURANCA_REGISTRO_INTERNO = {
     **AGENTE_008_SEGURANCA_CONSULTA,
@@ -5938,6 +5990,177 @@ def _importar_revisoes_documentais(cur, payload: GestaoOperacionalImportarReviso
     return serializar_json_seguro({"ok": True, "mvp": "0.8A", "obra_codigo": payload.obra_codigo, "encontrados": len(documentos), "registrados": registrados, "ignorados_por_duplicidade": duplicados, "revisoes_documentais_ids": ids, "resposta_telegram": f"📥 Importação documental — {payload.obra_codigo}\nEncontrados: {len(documentos)} | Registrados: {registrados} | Duplicados ignorados: {duplicados}\n\nArquivos mantidos no MinIO e recebidos apenas para análise; nenhuma liberação de campo foi realizada.", "flags_seguranca": dict(AGENTE_008_SEGURANCA_CONTROLE_DOCUMENTAL), **AGENTE_008_SEGURANCA_CONTROLE_DOCUMENTAL})
 
 
+def _decisor_revisao_documental(payload: GestaoOperacionalAprovarRevisaoDocumentalRequest) -> str:
+    return (
+        payload.decisor_nome or payload.decisor_telegram_username
+        or payload.decisor_telegram_user_id or "DECISOR_NAO_IDENTIFICADO"
+    )
+
+
+def _resposta_decisao_revisao_documental(
+    payload: GestaoOperacionalAprovarRevisaoDocumentalRequest,
+    documento: str,
+    status_revisao: str,
+    status_vigencia: str,
+    substituidas: int,
+) -> str:
+    cabecalhos = {
+        "APROVAR_COMO_VIGENTE": "✅ Revisão documental aprovada como vigente",
+        "REJEITAR": "❌ Revisão documental rejeitada",
+        "SOLICITAR_AJUSTES": "🛠️ Ajustes solicitados na revisão documental",
+        "MARCAR_EM_ANALISE": "🔎 Revisão documental marcada em análise técnica",
+    }
+    linhas = [f"{cabecalhos[payload.decisao]} — {payload.obra_codigo}", "", "Revisão:", f"#{payload.revisao_documental_id}"]
+    if payload.decisao == "APROVAR_COMO_VIGENTE":
+        linhas.extend(["", "Documento:", documento])
+    linhas.extend(["", "Status:", f"{status_revisao} / {status_vigencia}"])
+    if payload.decisao == "APROVAR_COMO_VIGENTE":
+        linhas.extend(["", "Substituições lógicas:", f"{substituidas} revisão(ões) anterior(es) marcada(s) como substituída(s)."])
+    elif payload.decisao == "REJEITAR":
+        linhas.extend(["", "Motivo:", payload.motivo or "Não informado."])
+    elif payload.decisao == "SOLICITAR_AJUSTES":
+        linhas.extend(["", "Observação:", payload.observacao or "Não informada."])
+    registro = {
+        "APROVAR_COMO_VIGENTE": "Aprovação técnica registrada.",
+        "REJEITAR": "Rejeição registrada.",
+        "SOLICITAR_AJUSTES": "Solicitação de ajustes registrada.",
+        "MARCAR_EM_ANALISE": "Análise técnica registrada.",
+    }[payload.decisao]
+    linhas.extend([
+        "", "Governança:", registro,
+        "Nenhum arquivo foi apagado ou movido no MinIO.",
+        "Nenhum projeto foi liberado automaticamente para campo.",
+        "Nenhum RDO, cronograma, OpenProject ou RPA foi alterado.",
+    ])
+    return "\n".join(linhas)
+
+
+def _aprovar_revisao_documental(
+    cur, payload: GestaoOperacionalAprovarRevisaoDocumentalRequest,
+) -> dict[str, Any]:
+    cur.execute(
+        """SELECT id, obra_codigo, documento_minio_id, documento_substituido_id,
+                  revisao_anterior_id, disciplina, area, codigo_documento,
+                  revisao_detectada, titulo_documento, nome_arquivo_original,
+                  status_revisao, status_vigencia
+           FROM revisoes_documentais_obra WHERE id = %s FOR UPDATE""",
+        (payload.revisao_documental_id,),
+    )
+    row = cur.fetchone()
+    if not row:
+        raise LookupError("Revisão documental não encontrada.")
+    campos = ("id", "obra_codigo", "documento_minio_id", "documento_substituido_id", "revisao_anterior_id", "disciplina", "area", "codigo_documento", "revisao_detectada", "titulo_documento", "nome_arquivo_original", "status_revisao", "status_vigencia")
+    revisao = dict(zip(campos, row))
+    if revisao["obra_codigo"] != payload.obra_codigo:
+        raise ValueError("obra_codigo não confere com a revisão documental.")
+
+    mapeamento = {
+        "APROVAR_COMO_VIGENTE": ("APROVADO_COMO_VIGENTE", "VIGENTE", True, False, False, "JA_APROVADA_COMO_VIGENTE"),
+        "REJEITAR": ("REJEITADO", "NAO_VIGENTE", False, True, False, "JA_REJEITADA"),
+        "SOLICITAR_AJUSTES": ("AJUSTES_SOLICITADOS", "NAO_VIGENTE", False, False, True, "JA_COM_AJUSTES_SOLICITADOS"),
+        "MARCAR_EM_ANALISE": ("EM_ANALISE_TECNICA", "NAO_VIGENTE", False, False, False, "JA_EM_ANALISE_TECNICA"),
+    }
+    status_revisao, status_vigencia, aprovado, rejeitado, ajustes, status_idempotente = mapeamento[payload.decisao]
+    documento = revisao["codigo_documento"] or revisao["titulo_documento"] or revisao["nome_arquivo_original"]
+    if revisao["status_revisao"] == status_revisao and revisao["status_vigencia"] == status_vigencia:
+        return serializar_json_seguro({
+            "ok": True, "mvp": "0.8B", "status": status_idempotente,
+            "obra_codigo": payload.obra_codigo, "revisao_documental_id": payload.revisao_documental_id,
+            "status_revisao_resultante": status_revisao, "status_vigencia_resultante": status_vigencia,
+            "revisoes_anteriores_substituidas": 0,
+            "resposta_telegram": _resposta_decisao_revisao_documental(payload, documento, status_revisao, status_vigencia, 0),
+            "flags_seguranca": dict(AGENTE_008_SEGURANCA_APROVACAO_DOCUMENTAL),
+            **AGENTE_008_SEGURANCA_APROVACAO_DOCUMENTAL,
+        })
+
+    decisor = _decisor_revisao_documental(payload)
+    campos_especificos = {
+        "APROVAR_COMO_VIGENTE": ", aprovado_por = %(decisor)s, aprovado_em = NOW()",
+        "REJEITAR": ", rejeitado_por = %(decisor)s, rejeitado_em = NOW(), motivo_rejeicao = %(motivo)s",
+        "SOLICITAR_AJUSTES": "",
+        "MARCAR_EM_ANALISE": ", responsavel_analise = %(decisor)s",
+    }[payload.decisao]
+    cur.execute(
+        f"""UPDATE revisoes_documentais_obra
+            SET status_revisao = %(status_revisao)s, status_vigencia = %(status_vigencia)s,
+                decisao_tecnica = %(decisao)s, decisao_tecnica_por = %(decisor)s,
+                decisao_tecnica_em = NOW(), motivo_decisao = %(motivo)s,
+                observacao_decisao = %(observacao)s, liberado_para_campo = FALSE,
+                liberou_execucao_campo = FALSE, atualizado_em = NOW()
+                {campos_especificos}
+            WHERE id = %(id)s""",
+        {"id": payload.revisao_documental_id, "status_revisao": status_revisao,
+         "status_vigencia": status_vigencia, "decisao": payload.decisao,
+         "decisor": decisor, "motivo": payload.motivo, "observacao": payload.observacao},
+    )
+
+    substituidas = 0
+    avisos: list[str] = []
+    if payload.decisao == "APROVAR_COMO_VIGENTE":
+        params = {"id": payload.revisao_documental_id, "obra_codigo": payload.obra_codigo,
+                  "codigo": revisao["codigo_documento"], "disciplina": revisao["disciplina"],
+                  "area": revisao["area"], "titulo": revisao["titulo_documento"]}
+        if revisao["codigo_documento"] and revisao["codigo_documento"].strip():
+            compatibilidade = "codigo_documento = %(codigo)s AND (%(disciplina)s IS NULL OR disciplina = %(disciplina)s) AND (%(area)s IS NULL OR area = %(area)s)"
+        elif all(isinstance(revisao[c], str) and revisao[c].strip() for c in ("disciplina", "area", "titulo_documento")):
+            compatibilidade = "disciplina = %(disciplina)s AND area = %(area)s AND LOWER(TRIM(titulo_documento)) = LOWER(TRIM(%(titulo)s))"
+        else:
+            compatibilidade = "FALSE"
+            avisos.append("substituicao_anterior_nao_aplicada_por_baixa_confianca")
+        cur.execute(
+            f"""UPDATE revisoes_documentais_obra
+                SET status_vigencia = 'SUBSTITUIDO', status_revisao = 'SUBSTITUIDO',
+                    substituida_por_revisao_id = %(id)s, substituida_em = NOW(),
+                    liberado_para_campo = FALSE, liberou_execucao_campo = FALSE,
+                    atualizado_em = NOW()
+                WHERE obra_codigo = %(obra_codigo)s AND id <> %(id)s
+                  AND status_vigencia = 'VIGENTE' AND {compatibilidade}""",
+            params,
+        )
+        substituidas = cur.rowcount
+
+    metadados = serializar_json_seguro({
+        "flags_seguranca": dict(AGENTE_008_SEGURANCA_APROVACAO_DOCUMENTAL),
+        **AGENTE_008_SEGURANCA_APROVACAO_DOCUMENTAL,
+        "avisos": avisos,
+    })
+    cur.execute(
+        """INSERT INTO aprovacoes_revisoes_documentais_obra (
+               obra_codigo, revisao_documental_id, documento_minio_id, documento_substituido_id,
+               revisao_anterior_id, disciplina, area, codigo_documento, revisao_detectada,
+               decisao, status_revisao_resultante, status_vigencia_resultante,
+               aprovado, rejeitado, ajustes_solicitados, motivo, observacao, decisor_nome,
+               decisor_telegram_user_id, decisor_telegram_username, decisor_chat_id, metadados
+           ) VALUES (
+               %(obra_codigo)s, %(id)s, %(documento_minio_id)s, %(documento_substituido_id)s,
+               %(revisao_anterior_id)s, %(disciplina)s, %(area)s, %(codigo_documento)s,
+               %(revisao_detectada)s, %(decisao)s, %(status_revisao)s, %(status_vigencia)s,
+               %(aprovado)s, %(rejeitado)s, %(ajustes)s, %(motivo)s, %(observacao)s,
+               %(decisor_nome)s, %(telegram_user_id)s, %(telegram_username)s, %(chat_id)s, %(metadados)s)
+           RETURNING id, criado_em""",
+        {**revisao, "obra_codigo": payload.obra_codigo, "decisao": payload.decisao,
+         "status_revisao": status_revisao, "status_vigencia": status_vigencia,
+         "aprovado": aprovado, "rejeitado": rejeitado, "ajustes": ajustes,
+         "motivo": payload.motivo, "observacao": payload.observacao,
+         "decisor_nome": payload.decisor_nome, "telegram_user_id": payload.decisor_telegram_user_id,
+         "telegram_username": payload.decisor_telegram_username, "chat_id": payload.decisor_chat_id,
+         "metadados": Json(metadados)},
+    )
+    aprovacao_id, criado_em = cur.fetchone()
+    return serializar_json_seguro({
+        "ok": True, "mvp": "0.8B", "status": "DECISAO_TECNICA_REGISTRADA",
+        "aprovacao_revisao_documental_id": aprovacao_id, "criado_em": criado_em,
+        "obra_codigo": payload.obra_codigo, "revisao_documental_id": payload.revisao_documental_id,
+        "decisao": payload.decisao, "status_revisao_resultante": status_revisao,
+        "status_vigencia_resultante": status_vigencia, "aprovado": aprovado,
+        "rejeitado": rejeitado, "ajustes_solicitados": ajustes,
+        "revisoes_anteriores_substituidas": substituidas, "avisos": avisos,
+        "resposta_telegram": _resposta_decisao_revisao_documental(payload, documento, status_revisao, status_vigencia, substituidas),
+        "flags_seguranca": dict(AGENTE_008_SEGURANCA_APROVACAO_DOCUMENTAL),
+        **AGENTE_008_SEGURANCA_APROVACAO_DOCUMENTAL,
+    })
+
+
 def _periodo_relatorio_semanal(
     data_inicio: date | None, data_fim: date | None,
 ) -> tuple[date, date]:
@@ -7872,6 +8095,23 @@ def importar_revisoes_documentais_pendentes(payload: GestaoOperacionalImportarRe
         raise HTTPException(status_code=500, detail={"message": "Erro ao importar revisões documentais pendentes.", "error": _texto_curto(exc, 200)})
 
 
+@app.post("/agentes/gestao-operacional/aprovar-revisao-documental")
+def aprovar_revisao_documental(payload: GestaoOperacionalAprovarRevisaoDocumentalRequest):
+    try:
+        with get_db_connection() as conn:
+            with conn.cursor() as cur:
+                return _aprovar_revisao_documental(cur, payload)
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail={
+            "message": "Erro ao registrar decisão técnica documental.",
+            "error": _texto_curto(exc, 200),
+        }) from exc
+
+
 @app.post("/agentes/gestao-operacional/acoes-operacionais")
 def listar_acoes_operacionais(payload: GestaoOperacionalListarAcoesRequest):
     with get_db_connection() as conn:
@@ -7945,7 +8185,8 @@ def processar_comando_agente_gestao_operacional(
                           'ATUALIZAR_ACAO_OPERACIONAL_OBRA',
                           'DETALHAR_ACAO_OPERACIONAL_OBRA',
                           'CONSULTAR_REVISOES_DOCUMENTAIS_OBRA',
-                          'IMPORTAR_REVISOES_DOCUMENTAIS_PENDENTES_OBRA'
+                          'IMPORTAR_REVISOES_DOCUMENTAIS_PENDENTES_OBRA',
+                          'APROVAR_REVISAO_DOCUMENTAL_OBRA'
                       )
                       AND ce.status = 'PENDENTE'
                       AND (%(id_comando)s::uuid IS NULL OR ce.id_comando = %(id_comando)s::uuid)
@@ -8321,6 +8562,22 @@ def processar_comando_agente_gestao_operacional(
                             )
                     except Exception as exc:
                         resultado = {"ok": False, "erro_controlado": _texto_curto(exc), "resposta_telegram": "Não foi possível importar as revisões documentais pendentes. Nenhum arquivo foi alterado.", "flags_seguranca": dict(AGENTE_008_SEGURANCA_CONTROLE_DOCUMENTAL), **AGENTE_008_SEGURANCA_CONTROLE_DOCUMENTAL}
+                elif comando["tipo_comando"] == "APROVAR_REVISAO_DOCUMENTAL_OBRA":
+                    dados_decisao = {**(comando["payload_comando"] or {}), "obra_codigo": comando["obra_codigo"]}
+                    campos_payload = set(GestaoOperacionalAprovarRevisaoDocumentalRequest.model_fields)
+                    dados_decisao = {chave: valor for chave, valor in dados_decisao.items() if chave in campos_payload}
+                    try:
+                        with conn.transaction():
+                            resultado = _aprovar_revisao_documental(
+                                cur, GestaoOperacionalAprovarRevisaoDocumentalRequest(**dados_decisao)
+                            )
+                    except Exception as exc:
+                        resultado = {
+                            "ok": False, "erro_controlado": _texto_curto(exc),
+                            "resposta_telegram": "Não foi possível registrar a decisão técnica documental. Nenhuma alteração externa foi realizada.",
+                            "flags_seguranca": dict(AGENTE_008_SEGURANCA_APROVACAO_DOCUMENTAL),
+                            **AGENTE_008_SEGURANCA_APROVACAO_DOCUMENTAL,
+                        }
                 else:
                     resultado = _resultado_consulta_documentos_classificados(
                         cur, comando["obra_codigo"], comando["payload_comando"]
@@ -8341,6 +8598,7 @@ def processar_comando_agente_gestao_operacional(
                         "SOLICITAR_ENVIO_RELATORIO_SEMANAL_EXECUTIVO_OBRA",
                         "CONSULTAR_REVISOES_DOCUMENTAIS_OBRA",
                         "IMPORTAR_REVISOES_DOCUMENTAIS_PENDENTES_OBRA",
+                        "APROVAR_REVISAO_DOCUMENTAL_OBRA",
                     }
                     and resultado.get("ok") is False
                     else "CONCLUIDO"
@@ -8383,6 +8641,8 @@ def processar_comando_agente_gestao_operacional(
                 flags_erro = AGENTE_008_SEGURANCA_APROVACAO_PDF
             elif comando["tipo_comando"] == "SOLICITAR_ENVIO_RELATORIO_SEMANAL_EXECUTIVO_OBRA":
                 flags_erro = AGENTE_008_SEGURANCA_SOLICITACAO_ENVIO
+            elif comando["tipo_comando"] == "APROVAR_REVISAO_DOCUMENTAL_OBRA":
+                flags_erro = AGENTE_008_SEGURANCA_APROVACAO_DOCUMENTAL
             else:
                 flags_erro = AGENTE_008_SEGURANCA_CONSULTA
             resultado_erro = {
@@ -8427,6 +8687,7 @@ def processar_comando_agente_gestao_operacional(
             if comando["tipo_comando"] in {
                 "CONSULTAR_REVISOES_DOCUMENTAIS_OBRA",
                 "IMPORTAR_REVISOES_DOCUMENTAIS_PENDENTES_OBRA",
+                "APROVAR_REVISAO_DOCUMENTAL_OBRA",
             }
             else (
                 "0.7L"
@@ -8658,8 +8919,21 @@ async def receber_entrada_telegram(
         "DETALHAR_ACAO_OPERACIONAL_OBRA",
         "CONSULTAR_REVISOES_DOCUMENTAIS_OBRA",
         "IMPORTAR_REVISOES_DOCUMENTAIS_PENDENTES_OBRA",
+        "APROVAR_REVISAO_DOCUMENTAL_OBRA",
     }
     obra_codigo = payload.obra_codigo or "OBRA-CAIO"
+    if (
+        usuario_autorizado
+        and classificacao["tipo_comando"] == "APROVAR_REVISAO_DOCUMENTAL_OBRA"
+        and classificacao.get("revisao_documental_id") is None
+    ):
+        mensagem = "Informe o ID da revisão documental. Exemplo: aprovar revisão #12 como vigente"
+        return {
+            "ok": True, "status": "ID_REVISAO_DOCUMENTAL_NAO_INFORMADO",
+            "obra_codigo": obra_codigo, "tipo_comando": None,
+            "mensagem_resposta_executiva": mensagem, "resposta_telegram": mensagem,
+            "acoes_externas_executadas": False,
+        }
     normalized = {
         "tenant_id": payload.tenant_id or "construtora-piloto",
         "obra_codigo": obra_codigo,
@@ -9322,6 +9596,20 @@ async def receber_entrada_telegram(
                             "prefixo": "01_projetos/00_recebidos_para_analise/",
                             "limite_itens": 50,
                             **AGENTE_008_SEGURANCA_CONTROLE_DOCUMENTAL,
+                        }
+                    elif classificacao["tipo_comando"] == "APROVAR_REVISAO_DOCUMENTAL_OBRA":
+                        dados_decisao = extrair_decisao_revisao_documental_telegram(normalized["conteudo"])
+                        payload_comando = {
+                            "obra_codigo": obra_codigo,
+                            "revisao_documental_id": dados_decisao["revisao_documental_id"],
+                            "decisao": dados_decisao["decisao"],
+                            "motivo": dados_decisao["motivo"],
+                            "observacao": dados_decisao["observacao"],
+                            "decisor_nome": normalized["remetente_nome"],
+                            "decisor_telegram_user_id": normalized["telegram_user_id"],
+                            "decisor_telegram_username": normalized["telegram_username"],
+                            "decisor_chat_id": normalized["chat_id"],
+                            **AGENTE_008_SEGURANCA_APROVACAO_DOCUMENTAL,
                         }
 
                 cur.execute(
