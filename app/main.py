@@ -444,6 +444,27 @@ class GestaoOperacionalAprovarRevisaoDocumentalRequest(BaseModel):
     decisor_chat_id: str | None = None
 
 
+class GestaoOperacionalLiberarRevisaoDocumentalCampoRequest(BaseModel):
+    obra_codigo: str = Field(min_length=1)
+    revisao_documental_id: int = Field(gt=0)
+    decisao: str = Field(pattern="^(LIBERAR_PARA_CAMPO|SUSPENDER_LIBERACAO_CAMPO|REVOGAR_LIBERACAO_CAMPO)$")
+    motivo: str | None = None
+    observacao: str | None = None
+    instrucoes_campo: str | None = None
+    decisor_nome: str | None = None
+    decisor_telegram_user_id: str | None = None
+    decisor_telegram_username: str | None = None
+    decisor_chat_id: str | None = None
+
+
+class GestaoOperacionalLiberacoesRevisoesDocumentaisCampoRequest(BaseModel):
+    obra_codigo: str = Field(min_length=1)
+    area: str | None = None
+    disciplina: str | None = None
+    status_liberacao: str | None = Field(default=None, pattern="^(LIBERADO_PARA_USO_DOCUMENTAL_EM_CAMPO|SUSPENSA|REVOGADA)$")
+    limite_itens: int = Field(default=20, ge=1, le=200)
+
+
 def get_db_connection():
     if not DATABASE_URL:
         raise RuntimeError("DATABASE_URL não definida.")
@@ -609,6 +630,17 @@ def classificar_intencao_executiva(conteudo: Optional[str]) -> dict[str, Any]:
     ]
     texto_comando = re.sub(r"\s+", " ", texto.strip().rstrip("?.!"))
     texto_comando_normalizado = normalizar_texto_comparacao(texto_comando)
+    liberacao_campo = extrair_liberacao_revisao_campo_telegram(conteudo)
+    if liberacao_campo:
+        return {
+            "intencao": "LIBERAR_REVISAO_DOCUMENTAL_CAMPO_OBRA",
+            "agente_destino": "AGENTE_008_GESTAO_OPERACIONAL_OBRA",
+            "tipo_comando": "LIBERAR_REVISAO_DOCUMENTAL_CAMPO_OBRA",
+            **liberacao_campo,
+            "requer_aprovacao": False,
+            "confianca": 0.99,
+            "justificativa": "Liberação documental de campo explícita e auditável, sem execução de serviço.",
+        }
     decisao_revisao = extrair_decisao_revisao_documental_telegram(conteudo)
     if decisao_revisao:
         return {
@@ -722,6 +754,10 @@ def classificar_intencao_executiva(conteudo: Optional[str]) -> dict[str, Any]:
         "projetos recebidos para analise", "ultimas revisoes de projeto",
         "status das revisoes documentais",
     }
+    comandos_consultar_liberacoes_campo = {
+        "revisoes liberadas para campo", "documentos liberados para campo",
+        "projetos liberados para campo", "status das liberacoes de campo",
+    }
     comandos_importar_revisoes = {
         "importar revisoes documentais pendentes",
         "registrar documentos recebidos para analise",
@@ -742,6 +778,14 @@ def classificar_intencao_executiva(conteudo: Optional[str]) -> dict[str, Any]:
             "tipo_comando": "CONSULTAR_REVISOES_DOCUMENTAIS_OBRA",
             "requer_aprovacao": False, "confianca": 0.99,
             "justificativa": "Consulta ao controle documental sem liberação de execução.",
+        }
+    if texto_comando_normalizado in comandos_consultar_liberacoes_campo:
+        return {
+            "intencao": "CONSULTAR_LIBERACOES_REVISOES_DOCUMENTAIS_CAMPO_OBRA",
+            "agente_destino": "AGENTE_008_GESTAO_OPERACIONAL_OBRA",
+            "tipo_comando": "CONSULTAR_LIBERACOES_REVISOES_DOCUMENTAIS_CAMPO_OBRA",
+            "requer_aprovacao": False, "confianca": 0.99,
+            "justificativa": "Consulta auditável das liberações documentais de campo.",
         }
     if texto_comando_normalizado in comandos_pdf_relatorio_semanal:
         return {
@@ -1321,6 +1365,14 @@ AGENTE_008_SEGURANCA_APROVACAO_DOCUMENTAL = {
     "documento_vira_vigente_apenas_por_decisao_explicita": True,
 }
 
+AGENTE_008_SEGURANCA_LIBERACAO_CAMPO = {
+    **AGENTE_008_SEGURANCA_CONTROLE_DOCUMENTAL,
+    "modo": "LIBERACAO_DOCUMENTAL_CAMPO_CONTROLADA",
+    "cria_ordem_servico": False,
+    "autoriza_execucao_servico": False,
+    "liberacao_apenas_para_uso_documental_campo": True,
+}
+
 
 def extrair_decisao_revisao_documental_telegram(conteudo: Optional[str]) -> dict[str, Any]:
     texto = normalizar_texto_comparacao(conteudo)
@@ -1341,6 +1393,28 @@ def extrair_decisao_revisao_documental_telegram(conteudo: Optional[str]) -> dict
         "revisao_documental_id": int(identificador.group(1)) if identificador else None,
         "motivo": detalhe if decisao == "REJEITAR" else None,
         "observacao": detalhe if decisao in {"SOLICITAR_AJUSTES", "MARCAR_EM_ANALISE"} else None,
+    }
+
+
+def extrair_liberacao_revisao_campo_telegram(conteudo: Optional[str]) -> dict[str, Any]:
+    texto = normalizar_texto_comparacao(conteudo)
+    padroes = (
+        ("SUSPENDER_LIBERACAO_CAMPO", r"^(?:suspender (?:liberacao da )?(?:revisao|documento|projeto)|pausar uso da (?:revisao|documento|projeto)).*(?:campo|em campo|no campo)?"),
+        ("REVOGAR_LIBERACAO_CAMPO", r"^(?:revogar (?:liberacao da )?(?:revisao|documento|projeto)|bloquear uso da (?:revisao|documento|projeto)).*(?:campo|em campo|do campo)?"),
+        ("LIBERAR_PARA_CAMPO", r"^(?:pode )?liberar (?:a )?(?:revisao|documento|projeto).*(?:para (?:uso em )?campo)$"),
+    )
+    decisao = next((valor for valor, padrao in padroes if re.search(padrao, texto)), None)
+    if not decisao:
+        return {}
+    identificador = re.search(r"(?:#\s*|\b(?:revisao|documento|projeto)\s+)(\d+)\b", texto)
+    extra = re.search(r"(?:\bmotivo\b|\bporque\b|\binstrucoes?\b|:)[\s:]*(.+)$", (conteudo or "").strip(), re.IGNORECASE)
+    detalhe = extra.group(1).strip() if extra else None
+    return {
+        "decisao": decisao,
+        "revisao_documental_id": int(identificador.group(1)) if identificador else None,
+        "motivo": detalhe if decisao != "LIBERAR_PARA_CAMPO" else None,
+        "observacao": detalhe,
+        "instrucoes_campo": detalhe if decisao == "LIBERAR_PARA_CAMPO" else None,
     }
 
 AGENTE_008_SEGURANCA_REGISTRO_INTERNO = {
@@ -6161,6 +6235,109 @@ def _aprovar_revisao_documental(
     })
 
 
+def _decisor_liberacao_campo(payload: GestaoOperacionalLiberarRevisaoDocumentalCampoRequest) -> str:
+    return payload.decisor_nome or payload.decisor_telegram_username or payload.decisor_telegram_user_id or "DECISOR_NAO_IDENTIFICADO"
+
+
+def _resposta_liberacao_campo(payload: GestaoOperacionalLiberarRevisaoDocumentalCampoRequest, documento: str, status: str) -> str:
+    if payload.decisao == "LIBERAR_PARA_CAMPO":
+        linhas = [f"✅ Revisão documental liberada para uso em campo — {payload.obra_codigo}", "", "Revisão:", f"#{payload.revisao_documental_id}", "", "Documento:", documento, "", "Status:", status, "", "Instruções:", payload.instrucoes_campo or "Não informadas.", "", "Governança:", "Liberação documental registrada.", "Nenhum arquivo foi apagado ou movido no MinIO.", "Nenhum link público foi criado.", "Nenhuma ordem de serviço foi criada.", "Nenhum RDO, cronograma, OpenProject ou RPA foi alterado."]
+    else:
+        revogada = payload.decisao == "REVOGAR_LIBERACAO_CAMPO"
+        titulo = "🚫 Liberação de campo revogada" if revogada else "⏸️ Liberação de campo suspensa"
+        registro = "Revogação registrada." if revogada else "Suspensão registrada."
+        linhas = [f"{titulo} — {payload.obra_codigo}", "", "Revisão:", f"#{payload.revisao_documental_id}", "", "Status:", status, "", "Motivo:", payload.motivo or "Não informado.", "", "Governança:", registro, "Nenhum arquivo foi apagado ou movido.", "Nenhuma ordem de serviço foi criada.", "Nenhum RDO, cronograma, OpenProject ou RPA foi alterado."]
+    return "\n".join(linhas)
+
+
+def _liberar_revisao_documental_campo(cur, payload: GestaoOperacionalLiberarRevisaoDocumentalCampoRequest) -> dict[str, Any]:
+    cur.execute("""SELECT id, obra_codigo, documento_minio_id, disciplina, area, codigo_documento,
+                          revisao_detectada, titulo_documento, nome_arquivo_original,
+                          status_revisao, status_vigencia, liberado_para_campo, liberacao_campo_status
+                   FROM revisoes_documentais_obra WHERE id = %s FOR UPDATE""", (payload.revisao_documental_id,))
+    row = cur.fetchone()
+    if not row:
+        raise LookupError("Revisão documental não encontrada.")
+    campos = ("id", "obra_codigo", "documento_minio_id", "disciplina", "area", "codigo_documento", "revisao_detectada", "titulo_documento", "nome_arquivo_original", "status_revisao", "status_vigencia", "liberado_para_campo", "liberacao_campo_status")
+    revisao = dict(zip(campos, row))
+    if revisao["obra_codigo"] != payload.obra_codigo:
+        raise ValueError("obra_codigo não confere com a revisão documental.")
+    mapa = {
+        "LIBERAR_PARA_CAMPO": ("LIBERADO_PARA_USO_DOCUMENTAL_EM_CAMPO", "JA_LIBERADA_PARA_CAMPO"),
+        "SUSPENDER_LIBERACAO_CAMPO": ("SUSPENSA", "JA_SUSPENSA"),
+        "REVOGAR_LIBERACAO_CAMPO": ("REVOGADA", "JA_REVOGADA"),
+    }
+    status, status_idempotente = mapa[payload.decisao]
+    documento = revisao["codigo_documento"] or revisao["titulo_documento"] or revisao["nome_arquivo_original"]
+    if (payload.decisao == "LIBERAR_PARA_CAMPO" and revisao["liberado_para_campo"]) or revisao["liberacao_campo_status"] == status:
+        cur.execute("""SELECT id FROM liberacoes_revisoes_documentais_campo_obra
+                       WHERE revisao_documental_id = %s AND status_liberacao_resultante = %s
+                       ORDER BY criado_em DESC, id DESC LIMIT 1""", (revisao["id"], status))
+        liberacao_existente = cur.fetchone()
+        return serializar_json_seguro({"ok": True, "mvp": "0.8C", "status": status_idempotente, "liberacao_id": liberacao_existente[0] if liberacao_existente else None, "obra_codigo": payload.obra_codigo, "revisao_documental_id": payload.revisao_documental_id, "status_liberacao_resultante": status, "resposta_telegram": _resposta_liberacao_campo(payload, documento, status), "flags_seguranca": dict(AGENTE_008_SEGURANCA_LIBERACAO_CAMPO), **AGENTE_008_SEGURANCA_LIBERACAO_CAMPO})
+    if payload.decisao == "LIBERAR_PARA_CAMPO" and (revisao["status_revisao"] != "APROVADO_COMO_VIGENTE" or revisao["status_vigencia"] != "VIGENTE"):
+        raise ValueError("REVISAO_DOCUMENTAL_NAO_VIGENTE")
+    decisor = _decisor_liberacao_campo(payload)
+    if payload.decisao == "LIBERAR_PARA_CAMPO":
+        extras = "liberado_para_campo_por = %(decisor)s, liberado_para_campo_em = NOW(), liberacao_campo_instrucoes = %(instrucoes)s,"
+    elif payload.decisao == "REVOGAR_LIBERACAO_CAMPO":
+        extras = "liberacao_campo_revogada_por = %(decisor)s, liberacao_campo_revogada_em = NOW(), motivo_revogacao_campo = %(motivo)s,"
+    else:
+        extras = "motivo_revogacao_campo = %(motivo)s,"
+    cur.execute(f"""UPDATE revisoes_documentais_obra SET liberado_para_campo = %(liberado)s,
+                        liberacao_campo_status = %(status)s, liberacao_campo_observacao = %(observacao)s,
+                        {extras} liberacao_campo_decisao_em = NOW(), liberou_execucao_campo = FALSE,
+                        atualizado_em = NOW() WHERE id = %(id)s""",
+                {"id": revisao["id"], "liberado": payload.decisao == "LIBERAR_PARA_CAMPO", "status": status, "observacao": payload.observacao, "instrucoes": payload.instrucoes_campo, "motivo": payload.motivo, "decisor": decisor})
+    cur.execute("""SELECT id FROM aprovacoes_revisoes_documentais_obra
+                   WHERE revisao_documental_id = %s ORDER BY criado_em DESC, id DESC LIMIT 1""", (revisao["id"],))
+    aprovacao = cur.fetchone()
+    metadados = serializar_json_seguro({"flags_seguranca": dict(AGENTE_008_SEGURANCA_LIBERACAO_CAMPO), **AGENTE_008_SEGURANCA_LIBERACAO_CAMPO})
+    cur.execute("""INSERT INTO liberacoes_revisoes_documentais_campo_obra (
+                       obra_codigo, revisao_documental_id, aprovacao_revisao_id, documento_minio_id,
+                       disciplina, area, codigo_documento, revisao_detectada, decisao,
+                       status_liberacao_resultante, liberado_para_campo, liberacao_suspensa,
+                       liberacao_revogada, motivo, observacao, instrucoes_campo, decisor_nome,
+                       decisor_telegram_user_id, decisor_telegram_username, decisor_chat_id, metadados)
+                   VALUES (%(obra)s, %(revisao_id)s, %(aprovacao_id)s, %(documento_id)s, %(disciplina)s,
+                       %(area)s, %(codigo)s, %(revisao)s, %(decisao)s, %(status)s, %(liberado)s,
+                       %(suspensa)s, %(revogada)s, %(motivo)s, %(observacao)s, %(instrucoes)s,
+                       %(decisor_nome)s, %(user_id)s, %(username)s, %(chat_id)s, %(metadados)s)
+                   RETURNING id, criado_em""",
+                {"obra": payload.obra_codigo, "revisao_id": revisao["id"], "aprovacao_id": aprovacao[0] if aprovacao else None, "documento_id": revisao["documento_minio_id"], "disciplina": revisao["disciplina"], "area": revisao["area"], "codigo": revisao["codigo_documento"], "revisao": revisao["revisao_detectada"], "decisao": payload.decisao, "status": status, "liberado": payload.decisao == "LIBERAR_PARA_CAMPO", "suspensa": payload.decisao == "SUSPENDER_LIBERACAO_CAMPO", "revogada": payload.decisao == "REVOGAR_LIBERACAO_CAMPO", "motivo": payload.motivo, "observacao": payload.observacao, "instrucoes": payload.instrucoes_campo, "decisor_nome": payload.decisor_nome, "user_id": payload.decisor_telegram_user_id, "username": payload.decisor_telegram_username, "chat_id": payload.decisor_chat_id, "metadados": Json(metadados)})
+    liberacao_id, criado_em = cur.fetchone()
+    return serializar_json_seguro({"ok": True, "mvp": "0.8C", "status": "DECISAO_LIBERACAO_CAMPO_REGISTRADA", "liberacao_id": liberacao_id, "criado_em": criado_em, "obra_codigo": payload.obra_codigo, "revisao_documental_id": revisao["id"], "decisao": payload.decisao, "status_liberacao_resultante": status, "liberado_para_campo": payload.decisao == "LIBERAR_PARA_CAMPO", "resposta_telegram": _resposta_liberacao_campo(payload, documento, status), "flags_seguranca": dict(AGENTE_008_SEGURANCA_LIBERACAO_CAMPO), **AGENTE_008_SEGURANCA_LIBERACAO_CAMPO})
+
+
+def _listar_liberacoes_revisoes_campo(cur, payload: GestaoOperacionalLiberacoesRevisoesDocumentaisCampoRequest) -> dict[str, Any]:
+    params = payload.model_dump()
+    base = """ FROM liberacoes_revisoes_documentais_campo_obra WHERE obra_codigo = %(obra_codigo)s
+        AND (%(area)s IS NULL OR area = %(area)s) AND (%(disciplina)s IS NULL OR disciplina = %(disciplina)s)"""
+    cur.execute("SELECT status_liberacao_resultante, count(*)" + base + " GROUP BY status_liberacao_resultante", params)
+    totais = {"LIBERADO_PARA_USO_DOCUMENTAL_EM_CAMPO": 0, "SUSPENSA": 0, "REVOGADA": 0}
+    totais.update(dict(cur.fetchall()))
+    colunas = "id, revisao_documental_id, documento_minio_id, disciplina, area, codigo_documento, revisao_detectada, decisao, status_liberacao_resultante, motivo, observacao, instrucoes_campo, criado_em"
+    cur.execute("SELECT " + colunas + base + " AND (%(status_liberacao)s IS NULL OR status_liberacao_resultante = %(status_liberacao)s) ORDER BY criado_em DESC, id DESC LIMIT %(limite_itens)s", params)
+    campos = tuple(item.strip() for item in colunas.split(","))
+    ultimas = [serializar_json_seguro(dict(zip(campos, row))) for row in cur.fetchall()]
+    cur.execute("""SELECT id, disciplina, area, codigo_documento, titulo_documento,
+                          nome_arquivo_original, revisao_detectada, liberacao_campo_instrucoes,
+                          liberado_para_campo_em
+                   FROM revisoes_documentais_obra WHERE obra_codigo = %(obra_codigo)s
+                     AND liberado_para_campo = TRUE
+                     AND (%(area)s IS NULL OR area = %(area)s)
+                     AND (%(disciplina)s IS NULL OR disciplina = %(disciplina)s)
+                   ORDER BY liberado_para_campo_em DESC NULLS LAST, id DESC LIMIT %(limite_itens)s""", params)
+    campos_atuais = ("id", "disciplina", "area", "codigo_documento", "titulo_documento", "nome_arquivo_original", "revisao_detectada", "instrucoes_campo", "liberado_para_campo_em")
+    atuais = [serializar_json_seguro(dict(zip(campos_atuais, row))) for row in cur.fetchall()]
+    linhas = [f"📋 Liberações documentais de campo — {payload.obra_codigo}", "", f"Liberadas: {totais['LIBERADO_PARA_USO_DOCUMENTAL_EM_CAMPO']}", f"Suspensas: {totais['SUSPENSA']}", f"Revogadas: {totais['REVOGADA']}", "", "Atualmente liberadas:"]
+    linhas.extend(f"- #{item['id']} {item['codigo_documento'] or item['titulo_documento'] or item['nome_arquivo_original']}" for item in atuais)
+    if not atuais:
+        linhas.append("- Nenhuma revisão liberada.")
+    linhas.extend(["", "Governança:", "Consulta documental; nenhuma ordem de serviço ou execução automática foi autorizada."])
+    return serializar_json_seguro({"ok": True, "mvp": "0.8C", "obra_codigo": payload.obra_codigo, "total_liberadas_para_campo": totais["LIBERADO_PARA_USO_DOCUMENTAL_EM_CAMPO"], "total_suspensas": totais["SUSPENSA"], "total_revogadas": totais["REVOGADA"], "ultimas_liberacoes": ultimas, "revisoes_atualmente_liberadas": atuais, "resposta_telegram": "\n".join(linhas), "flags_seguranca": dict(AGENTE_008_SEGURANCA_LIBERACAO_CAMPO), **AGENTE_008_SEGURANCA_LIBERACAO_CAMPO})
+
+
 def _periodo_relatorio_semanal(
     data_inicio: date | None, data_fim: date | None,
 ) -> tuple[date, date]:
@@ -8112,6 +8289,30 @@ def aprovar_revisao_documental(payload: GestaoOperacionalAprovarRevisaoDocumenta
         }) from exc
 
 
+@app.post("/agentes/gestao-operacional/liberar-revisao-documental-campo")
+def liberar_revisao_documental_campo(payload: GestaoOperacionalLiberarRevisaoDocumentalCampoRequest):
+    try:
+        with get_db_connection() as conn:
+            with conn.cursor() as cur:
+                return _liberar_revisao_documental_campo(cur, payload)
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail={"codigo": str(exc), "message": str(exc)}) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail={"message": "Erro ao registrar liberação documental de campo.", "error": _texto_curto(exc, 200)}) from exc
+
+
+@app.post("/agentes/gestao-operacional/liberacoes-revisoes-documentais-campo")
+def liberacoes_revisoes_documentais_campo(payload: GestaoOperacionalLiberacoesRevisoesDocumentaisCampoRequest):
+    try:
+        with get_db_connection() as conn:
+            with conn.cursor() as cur:
+                return _listar_liberacoes_revisoes_campo(cur, payload)
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail={"message": "Erro ao consultar liberações documentais de campo.", "error": _texto_curto(exc, 200)}) from exc
+
+
 @app.post("/agentes/gestao-operacional/acoes-operacionais")
 def listar_acoes_operacionais(payload: GestaoOperacionalListarAcoesRequest):
     with get_db_connection() as conn:
@@ -8186,7 +8387,9 @@ def processar_comando_agente_gestao_operacional(
                           'DETALHAR_ACAO_OPERACIONAL_OBRA',
                           'CONSULTAR_REVISOES_DOCUMENTAIS_OBRA',
                           'IMPORTAR_REVISOES_DOCUMENTAIS_PENDENTES_OBRA',
-                          'APROVAR_REVISAO_DOCUMENTAL_OBRA'
+                          'APROVAR_REVISAO_DOCUMENTAL_OBRA',
+                          'LIBERAR_REVISAO_DOCUMENTAL_CAMPO_OBRA',
+                          'CONSULTAR_LIBERACOES_REVISOES_DOCUMENTAIS_CAMPO_OBRA'
                       )
                       AND ce.status = 'PENDENTE'
                       AND (%(id_comando)s::uuid IS NULL OR ce.id_comando = %(id_comando)s::uuid)
@@ -8578,6 +8781,24 @@ def processar_comando_agente_gestao_operacional(
                             "flags_seguranca": dict(AGENTE_008_SEGURANCA_APROVACAO_DOCUMENTAL),
                             **AGENTE_008_SEGURANCA_APROVACAO_DOCUMENTAL,
                         }
+                elif comando["tipo_comando"] == "LIBERAR_REVISAO_DOCUMENTAL_CAMPO_OBRA":
+                    dados_liberacao = {**(comando["payload_comando"] or {}), "obra_codigo": comando["obra_codigo"]}
+                    campos_payload = set(GestaoOperacionalLiberarRevisaoDocumentalCampoRequest.model_fields)
+                    dados_liberacao = {chave: valor for chave, valor in dados_liberacao.items() if chave in campos_payload}
+                    try:
+                        with conn.transaction():
+                            resultado = _liberar_revisao_documental_campo(cur, GestaoOperacionalLiberarRevisaoDocumentalCampoRequest(**dados_liberacao))
+                    except Exception as exc:
+                        resultado = {"ok": False, "erro_controlado": _texto_curto(exc), "resposta_telegram": "Não foi possível registrar a liberação documental de campo. Nenhuma alteração externa foi realizada.", "flags_seguranca": dict(AGENTE_008_SEGURANCA_LIBERACAO_CAMPO), **AGENTE_008_SEGURANCA_LIBERACAO_CAMPO}
+                elif comando["tipo_comando"] == "CONSULTAR_LIBERACOES_REVISOES_DOCUMENTAIS_CAMPO_OBRA":
+                    dados_consulta = {**(comando["payload_comando"] or {}), "obra_codigo": comando["obra_codigo"]}
+                    campos_payload = set(GestaoOperacionalLiberacoesRevisoesDocumentaisCampoRequest.model_fields)
+                    dados_consulta = {chave: valor for chave, valor in dados_consulta.items() if chave in campos_payload}
+                    try:
+                        with conn.transaction():
+                            resultado = _listar_liberacoes_revisoes_campo(cur, GestaoOperacionalLiberacoesRevisoesDocumentaisCampoRequest(**dados_consulta))
+                    except Exception as exc:
+                        resultado = {"ok": False, "erro_controlado": _texto_curto(exc), "resposta_telegram": "Não foi possível consultar as liberações documentais de campo.", "flags_seguranca": dict(AGENTE_008_SEGURANCA_LIBERACAO_CAMPO), **AGENTE_008_SEGURANCA_LIBERACAO_CAMPO}
                 else:
                     resultado = _resultado_consulta_documentos_classificados(
                         cur, comando["obra_codigo"], comando["payload_comando"]
@@ -8599,6 +8820,8 @@ def processar_comando_agente_gestao_operacional(
                         "CONSULTAR_REVISOES_DOCUMENTAIS_OBRA",
                         "IMPORTAR_REVISOES_DOCUMENTAIS_PENDENTES_OBRA",
                         "APROVAR_REVISAO_DOCUMENTAL_OBRA",
+                        "LIBERAR_REVISAO_DOCUMENTAL_CAMPO_OBRA",
+                        "CONSULTAR_LIBERACOES_REVISOES_DOCUMENTAIS_CAMPO_OBRA",
                     }
                     and resultado.get("ok") is False
                     else "CONCLUIDO"
@@ -8643,6 +8866,8 @@ def processar_comando_agente_gestao_operacional(
                 flags_erro = AGENTE_008_SEGURANCA_SOLICITACAO_ENVIO
             elif comando["tipo_comando"] == "APROVAR_REVISAO_DOCUMENTAL_OBRA":
                 flags_erro = AGENTE_008_SEGURANCA_APROVACAO_DOCUMENTAL
+            elif comando["tipo_comando"] in {"LIBERAR_REVISAO_DOCUMENTAL_CAMPO_OBRA", "CONSULTAR_LIBERACOES_REVISOES_DOCUMENTAIS_CAMPO_OBRA"}:
+                flags_erro = AGENTE_008_SEGURANCA_LIBERACAO_CAMPO
             else:
                 flags_erro = AGENTE_008_SEGURANCA_CONSULTA
             resultado_erro = {
@@ -8920,6 +9145,8 @@ async def receber_entrada_telegram(
         "CONSULTAR_REVISOES_DOCUMENTAIS_OBRA",
         "IMPORTAR_REVISOES_DOCUMENTAIS_PENDENTES_OBRA",
         "APROVAR_REVISAO_DOCUMENTAL_OBRA",
+        "LIBERAR_REVISAO_DOCUMENTAL_CAMPO_OBRA",
+        "CONSULTAR_LIBERACOES_REVISOES_DOCUMENTAIS_CAMPO_OBRA",
     }
     obra_codigo = payload.obra_codigo or "OBRA-CAIO"
     if (
@@ -8934,6 +9161,13 @@ async def receber_entrada_telegram(
             "mensagem_resposta_executiva": mensagem, "resposta_telegram": mensagem,
             "acoes_externas_executadas": False,
         }
+    if (
+        usuario_autorizado
+        and classificacao["tipo_comando"] == "LIBERAR_REVISAO_DOCUMENTAL_CAMPO_OBRA"
+        and classificacao.get("revisao_documental_id") is None
+    ):
+        mensagem = "Informe o ID da revisão documental. Exemplo: liberar revisão #12 para campo"
+        return {"ok": True, "status": "ID_REVISAO_DOCUMENTAL_NAO_INFORMADO", "obra_codigo": obra_codigo, "tipo_comando": None, "mensagem_resposta_executiva": mensagem, "resposta_telegram": mensagem, "acoes_externas_executadas": False}
     normalized = {
         "tenant_id": payload.tenant_id or "construtora-piloto",
         "obra_codigo": obra_codigo,
@@ -9610,6 +9844,23 @@ async def receber_entrada_telegram(
                             "decisor_telegram_username": normalized["telegram_username"],
                             "decisor_chat_id": normalized["chat_id"],
                             **AGENTE_008_SEGURANCA_APROVACAO_DOCUMENTAL,
+                        }
+                    elif classificacao["tipo_comando"] == "LIBERAR_REVISAO_DOCUMENTAL_CAMPO_OBRA":
+                        dados_liberacao = extrair_liberacao_revisao_campo_telegram(normalized["conteudo"])
+                        payload_comando = {
+                            "obra_codigo": obra_codigo,
+                            **dados_liberacao,
+                            "decisor_nome": None,
+                            "decisor_telegram_user_id": normalized["telegram_user_id"],
+                            "decisor_telegram_username": normalized["telegram_username"],
+                            "decisor_chat_id": normalized["chat_id"],
+                            **AGENTE_008_SEGURANCA_LIBERACAO_CAMPO,
+                        }
+                    elif classificacao["tipo_comando"] == "CONSULTAR_LIBERACOES_REVISOES_DOCUMENTAIS_CAMPO_OBRA":
+                        payload_comando = {
+                            "obra_codigo": obra_codigo, "area": None, "disciplina": None,
+                            "status_liberacao": None, "limite_itens": 20,
+                            **AGENTE_008_SEGURANCA_LIBERACAO_CAMPO,
                         }
 
                 cur.execute(
