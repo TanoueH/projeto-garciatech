@@ -6149,9 +6149,10 @@ def _consultar_evidencias_operacionais(cur: Any, payload: GestaoOperacionalEvide
         fim = datetime.combine(fim + timedelta(days=1), datetime.min.time(), tzinfo=timezone.utc)
     filtros = {**payload.model_dump(), "data_inicio": inicio, "data_fim": fim}
     where = """obra_codigo = %(obra_codigo)s AND data_recebimento >= %(data_inicio)s AND data_recebimento <= %(data_fim)s
-        AND (%(area)s IS NULL OR area = %(area)s) AND (%(disciplina)s IS NULL OR disciplina = %(disciplina)s)
-        AND (%(tipo_evidencia)s IS NULL OR tipo_evidencia = %(tipo_evidencia)s)
-        AND (%(status_triagem)s IS NULL OR status_triagem = %(status_triagem)s)"""
+        AND (%(area)s::text IS NULL OR area = %(area)s::text)
+        AND (%(disciplina)s::text IS NULL OR disciplina = %(disciplina)s::text)
+        AND (%(tipo_evidencia)s::text IS NULL OR tipo_evidencia = %(tipo_evidencia)s::text)
+        AND (%(status_triagem)s::text IS NULL OR status_triagem = %(status_triagem)s::text)"""
     cur.execute(f"""SELECT COUNT(*), COUNT(*) FILTER (WHERE tipo_evidencia = 'TEXTO'),
         COUNT(*) FILTER (WHERE tipo_evidencia IN ('FOTO','FOTO_COM_LEGENDA')),
         COUNT(*) FILTER (WHERE tipo_evidencia = 'AUDIO'), COUNT(*) FILTER (WHERE tipo_evidencia = 'DOCUMENTO'),
