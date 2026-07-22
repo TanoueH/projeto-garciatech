@@ -1,0 +1,270 @@
+[
+  {
+    "updatedAt": "2026-07-22T18:12:02.528Z",
+    "createdAt": "2026-06-07T21:23:13.315Z",
+    "id": "v5eBLxkXM1aFxHhXNqZjw",
+    "name": "WF_00_WHATSAPP_ENTRADA_API_CORE",
+    "description": null,
+    "active": true,
+    "isArchived": false,
+    "nodes": [
+      {
+        "parameters": {
+          "httpMethod": "POST",
+          "path": "whatsapp-entrada",
+          "options": {
+            "rawBody": true,
+            "responseCode": {
+              "values": {}
+            }
+          }
+        },
+        "type": "n8n-nodes-base.webhook",
+        "typeVersion": 2.1,
+        "position": [
+          32,
+          0
+        ],
+        "id": "35eee431-1c01-4fb0-be29-44eb61923c3e",
+        "name": "Webhook",
+        "webhookId": "762ef764-c21b-4e09-b0d8-92b902af33ac"
+      },
+      {
+        "parameters": {
+          "jsCode": "// ============================================================\n// Code Node: Code-Normalizar WhatsApp\n// Projeto Garcia / construction-science-agents\n//\n// Objetivo:\n// - Normalizar o webhook da Evolution API.\n// - Identificar o remetente e a obra.\n// - Produzir payload_evidencia_api exatamente no contrato do backend.\n// - Preparar somente os dados mínimos para o download posterior da mídia.\n//\n// Governança:\n// - Não executa RPA.\n// - Não altera RDO, cronograma, pendências, ações ou compras.\n// - Não envia e-mail nem arquivos a terceiros.\n// - Não inclui o payload original no corpo enviado à API.\n// ============================================================\n\nconst inputOriginal = $input.first().json;\nconst body = inputOriginal.body ?? inputOriginal;\n\n// ============================================================\n// 0. Configurações operacionais do piloto\n// ============================================================\n\nconst TENANT_ID = 'construtora-piloto';\nconst DEFAULT_OBRA_CODIGO = 'OBRA-CAIO';\nconst RESTRINGIR_REMETENTES = true;\n\n// Telefones somente com dígitos, DDI e DDD.\nconst CONTATOS_AUTORIZADOS = {\n  'TELEFONE_AUTORIZADO_1': {\n    nome: 'CONTATO_AUTORIZADO_1',\n    funcao: 'MESTRE_OBRAS',\n    email: 'EMAIL_AUTORIZADO_1',\n    obra_codigo: 'OBRA-CAIO'\n  },\n  'TELEFONE_AUTORIZADO_2': {\n    nome: 'CONTATO_AUTORIZADO_2',\n    funcao: 'Engenheiro',\n    email: 'EMAIL_AUTORIZADO_2',\n    obra_codigo: 'OBRA-CAIO'\n  },\n  'TELEFONE_AUTORIZADO_3': {\n    nome: 'CONTATO_AUTORIZADO_3',\n    funcao: 'Engenheira',\n    email: null,\n    obra_codigo: 'OBRA-CAIO'\n  },\n  'TELEFONE_AUTORIZADO_4': {\n    nome: 'CONTATO_AUTORIZADO_4',\n    funcao: 'GERENTE_OBRA',\n    email: 'EMAIL_AUTORIZADO_3',\n    obra_codigo: 'OBRA-CAIO'\n  }\n};\n// ============================================================\n// 1. Funções utilitárias\n// ============================================================\n\nfunction pick(...values) {\n  for (const value of values) {\n    if (value !== undefined && value !== null && value !== '') {\n      return value;\n    }\n  }\n  return null;\n}\n\nfunction cleanText(value) {\n  if (value === undefined || value === null) return '';\n  return String(value).replace(/^=/, '').trim();\n}\n\nfunction nullableText(value) {\n  const text = cleanText(value);\n  return text || null;\n}\n\nfunction onlyDigits(value) {\n  const text = cleanText(value);\n  if (!text) return null;\n  const digits = text.replace(/\\D/g, '');\n  return digits || null;\n}\n\nfunction phoneFromJid(value) {\n  const text = cleanText(value);\n  if (!text) return null;\n\n  const localPart = text.split('@')[0].split(':')[0];\n  return onlyDigits(localPart);\n}\n\nfunction normalizeObraCodigo(value) {\n  const text = cleanText(value).toUpperCase();\n  if (!text) return null;\n\n  const match = text.match(/\\bOBRA(?:[-_\\s][A-Z0-9]+)+\\b/);\n  if (!match) return null;\n\n  return match[0]\n    .replace(/[_\\s]+/g, '-')\n    .replace(/-+/g, '-');\n}\n\nfunction unwrapMessage(message) {\n  let current = message && typeof message === 'object' ? message : {};\n\n  for (let i = 0; i < 4; i += 1) {\n    const wrapped =\n      current?.ephemeralMessage?.message ??\n      current?.viewOnceMessage?.message ??\n      current?.viewOnceMessageV2?.message ??\n      current?.documentWithCaptionMessage?.message;\n\n    if (!wrapped || typeof wrapped !== 'object') break;\n    current = wrapped;\n  }\n\n  return current;\n}\n\nfunction normalizeBase64(value) {\n  const text = cleanText(value);\n  if (!text) return null;\n\n  // Aceita base64 puro ou data URL, mas envia somente o conteúdo base64.\n  const marker = ';base64,';\n  return text.includes(marker) ? text.split(marker).pop() : text;\n}\n\n// ============================================================\n// 2. Extração do envelope da Evolution API\n// ============================================================\n\nconst data = body.data ?? body;\nconst key = data?.key ?? body?.key ?? {};\nconst messageObject = unwrapMessage(\n  data?.message ?? body?.message ?? {}\n);\n\nconst messageId = nullableText(\n  pick(\n    key?.id,\n    data?.messageId,\n    body?.messageId,\n    data?.id,\n    body?.id\n  )\n);\n\nconst remoteJid = nullableText(\n  pick(\n    key?.remoteJid,\n    data?.remoteJid,\n    body?.remoteJid,\n    data?.sender,\n    body?.sender,\n    data?.from,\n    body?.from,\n    body?.telefone\n  )\n);\n\n// Em mensagens com addressingMode=\"lid\", remoteJid contém um identificador\n// interno e remoteJidAlt contém o telefone real no formato @s.whatsapp.net.\nconst remoteJidAlt = nullableText(\n  pick(\n    key?.remoteJidAlt,\n    data?.remoteJidAlt,\n    body?.remoteJidAlt,\n    key?.remoteJidPn,\n    data?.remoteJidPn,\n    body?.remoteJidPn\n  )\n);\n\nconst participant = nullableText(\n  pick(\n    key?.participant,\n    data?.participant,\n    body?.participant\n  )\n);\n\nconst senderPn = nullableText(\n  pick(\n    key?.senderPn,\n    data?.senderPn,\n    body?.senderPn,\n    key?.sender_pn,\n    data?.sender_pn,\n    body?.sender_pn\n  )\n);\n\n// Em grupo, participant identifica o autor. Em conversa direta com @lid,\n// remoteJidAlt deve prevalecer sobre o identificador interno.\nconst senderCandidate = participant || remoteJid;\nconst senderJid =\n  senderCandidate?.includes('@lid')\n    ? (remoteJidAlt || senderPn || senderCandidate)\n    : (senderPn || participant || remoteJidAlt || remoteJid);\n\n// Telefone real usado na autorização.\nconst numeroOrigem =\n  phoneFromJid(remoteJidAlt) ||\n  phoneFromJid(senderPn) ||\n  phoneFromJid(senderJid) ||\n  phoneFromJid(participant) ||\n  phoneFromJid(remoteJid);\n\nconst instance = nullableText(\n  pick(\n    body?.instance,\n    body?.instanceName,\n    data?.instance,\n    data?.instanceName\n  )\n);\n\nconst event = nullableText(\n  pick(\n    body?.event,\n    inputOriginal?.event\n  )\n);\n\nconst pushName = nullableText(\n  pick(\n    data?.pushName,\n    data?.senderName,\n    body?.pushName,\n    body?.nome_contato\n  )\n);\n\n// ============================================================\n// 3. Identificação e autorização preliminar\n// ============================================================\n\nconst contatoAutorizado =\n  numeroOrigem && CONTATOS_AUTORIZADOS[numeroOrigem]\n    ? CONTATOS_AUTORIZADOS[numeroOrigem]\n    : null;\n\nconst remetenteAutorizado =\n  !RESTRINGIR_REMETENTES || Boolean(contatoAutorizado);\n\nconst remetenteNome =\n  contatoAutorizado?.nome || pushName || 'Remetente não identificado';\n\nconst remetenteFuncao =\n  contatoAutorizado?.funcao || 'NAO_AUTORIZADO';\n\nconst remetenteEmail =\n  contatoAutorizado?.email || null;\n\n// Identificador estável enviado ao backend. O número normalizado é preferido\n// porque @lid pode variar e não representa necessariamente o telefone real.\n\nconst remetenteIdentificador =\n  numeroOrigem ||\n  remoteJidAlt ||\n  senderJid ||\n  participant ||\n  remoteJid;\n\n// ============================================================\n// 4. Conteúdo textual e mídia\n// ============================================================\n\nconst imageMessage = messageObject?.imageMessage ?? null;\nconst documentMessage = messageObject?.documentMessage ?? null;\nconst audioMessage = messageObject?.audioMessage ?? null;\nconst videoMessage = messageObject?.videoMessage ?? null;\n\nconst texto = nullableText(\n  pick(\n    messageObject?.conversation,\n    messageObject?.extendedTextMessage?.text,\n    data?.text,\n    typeof body?.message === 'string' ? body.message : null,\n    body?.mensagem\n  )\n);\n\nconst legenda = nullableText(\n  pick(\n    imageMessage?.caption,\n    documentMessage?.caption,\n    videoMessage?.caption\n  )\n);\n\nlet tipoMensagem = 'texto';\nlet tipoMidia = null;\nlet mediaMessage = null;\n\nif (imageMessage) {\n  tipoMensagem = 'imagem';\n  tipoMidia = 'image';\n  mediaMessage = imageMessage;\n} else if (documentMessage) {\n  tipoMensagem = 'documento';\n  tipoMidia = 'document';\n  mediaMessage = documentMessage;\n} else if (audioMessage) {\n  tipoMensagem = 'audio';\n  tipoMidia = 'audio';\n  mediaMessage = audioMessage;\n} else if (videoMessage) {\n  // O backend atual não possui normalização específica para vídeo.\n  tipoMensagem = 'video';\n  tipoMidia = null;\n  mediaMessage = videoMessage;\n}\n\nconst mimeType = nullableText(\n  pick(\n    mediaMessage?.mimetype,\n    mediaMessage?.mimeType,\n    data?.mimetype,\n    body?.mimetype\n  )\n);\n\nconst nomeArquivoOriginal = nullableText(\n  pick(\n    documentMessage?.fileName,\n    mediaMessage?.fileName,\n    data?.fileName,\n    body?.fileName\n  )\n);\n\nconst arquivoBase64 = normalizeBase64(\n  pick(\n    mediaMessage?.base64,\n    data?.base64,\n    body?.base64\n  )\n);\n\n// ============================================================\n// 5. Obra e decisão de roteamento\n// ============================================================\n\nconst textoParaObra = [texto, legenda].filter(Boolean).join(' ');\nconst obraCodigoMensagem = normalizeObraCodigo(textoParaObra);\n\n// Durante o piloto, contatos e mensagens devem convergir para OBRA-CAIO.\nconst obraCodigo =\n  obraCodigoMensagem ||\n  contatoAutorizado?.obra_codigo ||\n  DEFAULT_OBRA_CODIGO;\n\nlet decisaoRoteamento = 'REGISTRAR_EVIDENCIA';\nlet motivoBloqueio = null;\n\nif (key?.fromMe === true) {\n  decisaoRoteamento = 'IGNORAR_MENSAGEM_PROPRIA';\n  motivoBloqueio = 'Mensagem enviada pela própria instância do WhatsApp.';\n} else if (!remetenteAutorizado) {\n  decisaoRoteamento = 'BLOQUEAR_REMETENTE_NAO_AUTORIZADO';\n  motivoBloqueio = 'Remetente não consta na lista autorizada do piloto.';\n} else if (!messageId) {\n  decisaoRoteamento = 'BLOQUEAR_SEM_MESSAGE_ID';\n  motivoBloqueio = 'A Evolution API não forneceu um identificador de mensagem.';\n} else if (!texto && !legenda && !mediaMessage) {\n  decisaoRoteamento = 'BLOQUEAR_CONTEUDO_VAZIO';\n  motivoBloqueio = 'A mensagem não contém texto, legenda ou mídia suportada.';\n} else if (videoMessage) {\n  decisaoRoteamento = 'BLOQUEAR_TIPO_MIDIA_NAO_SUPORTADO';\n  motivoBloqueio = 'Vídeo ainda não é suportado pelo endpoint de evidências.';\n}\n\nconst deveBaixarMidia =\n  decisaoRoteamento === 'REGISTRAR_EVIDENCIA' &&\n  Boolean(tipoMidia) &&\n  !arquivoBase64;\n\n// ============================================================\n// 6. Payload exatamente compatível com o backend\n// ============================================================\n\nconst payloadEvidenciaApi = {\n  obra_codigo: obraCodigo,\n  remetente_nome: remetenteNome,\n  remetente_identificador: remetenteIdentificador,\n  remetente_autorizado: remetenteAutorizado,\n  chat_id: remoteJid,\n  message_id: messageId,\n  provider_message_id: messageId,\n  texto,\n  legenda,\n  tipo_midia: tipoMidia,\n  mime_type: mimeType,\n  nome_arquivo_original: nomeArquivoOriginal,\n  arquivo_base64: arquivoBase64,\n  metadados: {\n    tenant_id: TENANT_ID,\n    canal: 'whatsapp',\n    provider: 'evolution_api',\n    instance,\n    event,\n    tipo_mensagem: tipoMensagem,\n    remetente_funcao: remetenteFuncao,\n    remetente_email: remetenteEmail,\n    numero_origem: numeroOrigem,\n    remote_jid: remoteJid,\n    remote_jid_alt: remoteJidAlt,\n    participant,\n    sender_pn: senderPn,\n    normalizador: 'Code-Normalizar WhatsApp',\n    versao_normalizador: '008e-whatsapp-evidencias-v3'\n  }\n};\n\n// ============================================================\n// 7. Saída do Code Node\n// ============================================================\n\nreturn [\n  {\n    json: {\n      ok_normalizacao: true,\n      decisao_roteamento: decisaoRoteamento,\n      motivo_bloqueio: motivoBloqueio,\n      remetente_autorizado: remetenteAutorizado,\n      deve_baixar_midia: deveBaixarMidia,\n      payload_evidencia_api: payloadEvidenciaApi,\n\n      // Usar somente no ramo de download da mídia. Não enviar este objeto\n      // para o endpoint registrar-evidencia-whatsapp.\n      dados_download_midia: deveBaixarMidia\n        ? {\n            instance,\n            message_id: messageId,\n            tipo_midia: tipoMidia,\n            mime_type: mimeType,\n            nome_arquivo_original: nomeArquivoOriginal,\n            media_key: nullableText(mediaMessage?.mediaKey),\n            direct_path: nullableText(mediaMessage?.directPath),\n            file_length: mediaMessage?.fileLength ?? null\n          }\n        : null\n    }\n  }\n];"
+        },
+        "type": "n8n-nodes-base.code",
+        "typeVersion": 2,
+        "position": [
+          240,
+          0
+        ],
+        "id": "fea87324-d3b1-4512-801d-8b0ee1834bcc",
+        "name": "Normalizar WhatsApp"
+      },
+      {
+        "parameters": {
+          "method": "POST",
+          "url": "http://api_core:8000/agentes/gestao-operacional/registrar-evidencia-whatsapp",
+          "sendBody": true,
+          "contentType": "raw",
+          "rawContentType": "application/json",
+          "body": "={{ JSON.stringify($json.payload_evidencia_api) }}",
+          "options": {}
+        },
+        "type": "n8n-nodes-base.httpRequest",
+        "typeVersion": 4.3,
+        "position": [
+          1280,
+          0
+        ],
+        "id": "6d33e624-3099-4091-b431-6d8da42cbe77",
+        "name": "Enviar para api_core"
+      },
+      {
+        "parameters": {
+          "conditions": {
+            "options": {
+              "caseSensitive": true,
+              "leftValue": "",
+              "typeValidation": "strict",
+              "version": 3
+            },
+            "conditions": [
+              {
+                "id": "7e0252b3-6446-48f0-91c7-b3878be77f97",
+                "leftValue": "={{ $json.decisao_roteamento === 'REGISTRAR_EVIDENCIA' }}",
+                "rightValue": "true",
+                "operator": {
+                  "type": "boolean",
+                  "operation": "true",
+                  "singleValue": true
+                }
+              }
+            ],
+            "combinator": "and"
+          },
+          "options": {}
+        },
+        "type": "n8n-nodes-base.if",
+        "typeVersion": 2.3,
+        "position": [
+          448,
+          0
+        ],
+        "id": "80ad4952-8df6-40bc-b49f-22effb7cfa4d",
+        "name": "If- Pode registrar ?"
+      },
+      {
+        "parameters": {
+          "jsCode": "// Entrada atual: resposta do download da Evolution\nconst respostaDownload = $input.first().json;\n\nconst download =\n  respostaDownload.body &&\n  typeof respostaDownload.body === 'object'\n    ? respostaDownload.body\n    : respostaDownload;\n\n// Recupera o payload original do normalizador\nconst normalizacao =\n  $('Normalizar WhatsApp').first().json;\n\nconst payloadOriginal =\n  normalizacao.payload_evidencia_api;\n\nif (!payloadOriginal) {\n  throw new Error(\n    'payload_evidencia_api não encontrado no Normalizar WhatsApp.'\n  );\n}\n\nfunction primeiroTextoValido(...valores) {\n  return valores.find(\n    valor =>\n      typeof valor === 'string' &&\n      valor.trim().length > 0\n  ) ?? null;\n}\n\n// Localiza o Base64 retornado pela Evolution\nlet arquivoBase64 = primeiroTextoValido(\n  download.base64,\n  download.message?.base64,\n  download.data?.base64,\n  download.data?.message?.base64,\n\n  typeof download.data === 'string'\n    ? download.data\n    : null\n);\n\nif (!arquivoBase64) {\n  const camposRecebidos =\n    Object.keys(download).join(', ') || '(nenhum)';\n\n  throw new Error(\n    `Base64 não localizado. Campos recebidos: ${camposRecebidos}.`\n  );\n}\n\n// Remove eventual prefixo data URL\narquivoBase64 = arquivoBase64\n  .trim()\n  .replace(/^data:[^;]+;base64,/, '');\n\nconst mimeType =\n  download.mimetype ??\n  download.mimeType ??\n  payloadOriginal.mime_type ??\n  'application/octet-stream';\n\nconst extensoes = {\n  'image/jpeg': 'jpg',\n  'image/jpg': 'jpg',\n  'image/png': 'png',\n  'image/webp': 'webp',\n  'application/pdf': 'pdf',\n  'video/mp4': 'mp4',\n  'audio/ogg': 'ogg'\n};\n\nconst extensao =\n  extensoes[mimeType] ?? 'bin';\n\nconst nomeArquivo =\n  payloadOriginal.nome_arquivo_original ??\n  download.fileName ??\n  download.filename ??\n  `${payloadOriginal.message_id}.${extensao}`;\n\nconst payloadComMidia = {\n  ...payloadOriginal,\n\n  arquivo_base64: arquivoBase64,\n  mime_type: mimeType,\n  nome_arquivo_original: nomeArquivo,\n\n  metadados: {\n    ...(payloadOriginal.metadados ?? {}),\n    midia_baixada_evolution: true,\n    tamanho_base64_caracteres: arquivoBase64.length,\n    largura_imagem: download.width ?? null,\n    altura_imagem: download.height ?? null\n  }\n};\n\n// O node está configurado como \"Run Once for All Items\"\nreturn [\n  {\n    json: {\n      ...normalizacao,\n      payload_evidencia_api: payloadComMidia\n    }\n  }\n];"
+        },
+        "type": "n8n-nodes-base.code",
+        "typeVersion": 2,
+        "position": [
+          1056,
+          -176
+        ],
+        "id": "faf7e658-b30b-4256-879c-43bd29435de7",
+        "name": "Anexar mídia ao payload"
+      },
+      {
+        "parameters": {
+          "conditions": {
+            "options": {
+              "caseSensitive": true,
+              "leftValue": "",
+              "typeValidation": "strict",
+              "version": 3
+            },
+            "conditions": [
+              {
+                "id": "3cb53e1c-222a-467d-ab50-c3d7869bd959",
+                "leftValue": "={{ $json.deve_baixar_midia }}",
+                "rightValue": {},
+                "operator": {
+                  "type": "boolean",
+                  "operation": "true",
+                  "singleValue": true
+                }
+              }
+            ],
+            "combinator": "and"
+          },
+          "options": {}
+        },
+        "type": "n8n-nodes-base.if",
+        "typeVersion": 2.3,
+        "position": [
+          672,
+          -80
+        ],
+        "id": "7f62b77d-cda1-4fbc-ac66-936f64b471ea",
+        "name": "Precisa-baixar-midia"
+      },
+      {
+        "parameters": {
+          "method": "POST",
+          "url": "http://evolution-api:8080/chat/getBase64FromMediaMessage/obra-caio-v3",
+          "sendHeaders": true,
+          "headerParameters": {
+            "parameters": [
+              {
+                "name": "apikey",
+                "value": "apikey1234"
+              }
+            ]
+          },
+          "sendBody": true,
+          "contentType": "raw",
+          "rawContentType": "application/json",
+          "body": "={{ JSON.stringify({   message: {     key: {       remoteJid: $json.payload_evidencia_api.chat_id,       fromMe: false,       id: $json.payload_evidencia_api.message_id     }   },   convertToMp4: false }) }}",
+          "options": {}
+        },
+        "type": "n8n-nodes-base.httpRequest",
+        "typeVersion": 4.3,
+        "position": [
+          848,
+          -224
+        ],
+        "id": "9de0e7e8-0121-41e2-bf7b-ca7ba1cc87e0",
+        "name": "Baixar mídia na Evolution"
+      }
+    ],
+    "connections": {
+      "Webhook": {
+        "main": [
+          [
+            {
+              "node": "Normalizar WhatsApp",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Normalizar WhatsApp": {
+        "main": [
+          [
+            {
+              "node": "If- Pode registrar ?",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Enviar para api_core": {
+        "main": [
+          []
+        ]
+      },
+      "If- Pode registrar ?": {
+        "main": [
+          [
+            {
+              "node": "Precisa-baixar-midia",
+              "type": "main",
+              "index": 0
+            }
+          ],
+          []
+        ]
+      },
+      "Anexar mídia ao payload": {
+        "main": [
+          [
+            {
+              "node": "Enviar para api_core",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Precisa-baixar-midia": {
+        "main": [
+          [
+            {
+              "node": "Baixar mídia na Evolution",
+              "type": "main",
+              "index": 0
+            }
+          ],
+          [
+            {
+              "node": "Enviar para api_core",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Baixar mídia na Evolution": {
+        "main": [
+          [
+            {
+              "node": "Anexar mídia ao payload",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      }
+    },
+    "settings": {
+      "executionOrder": "v1",
+      "availableInMCP": false
+    },
+    "staticData": null,
+    "meta": {
+      "templateCredsSetupCompleted": true
+    },
+    "pinData": {},
+    "versionId": "549dd364-36af-4b6b-b35b-b3b6a3809141",
+    "activeVersionId": "549dd364-36af-4b6b-b35b-b3b6a3809141",
+    "versionCounter": 1796,
+    "triggerCount": 1,
+    "tags": []
+  }
+]

@@ -480,3 +480,31 @@ A ordem correta é:
 9. normas;
 10. Gantt;
 11. decisões executivas aprovadas.
+
+---
+
+## 20. Fechamento do MVP 0.8E — entrada via WhatsApp
+
+Em 22/07/2026, foi concluída e validada a integração de entrada do MVP 0.8E com
+texto e fotografia real recebidos pelo WhatsApp.
+
+O caminho validado foi:
+
+```text
+WhatsApp → Evolution API → n8n → API Core
+```
+
+Os dados recebidos foram persistidos no PostgreSQL, e a fotografia foi armazenada
+de forma privada no MinIO. O processamento preservou a identificação do remetente
+e a rastreabilidade da mensagem desde sua origem.
+
+Nesta integração, o n8n permaneceu apenas como orquestrador de transporte. A API
+Core continuou como ponto de entrada controlado, e o PostgreSQL permaneceu como
+memória operacional e camada de auditoria.
+
+A validação não realizou nenhuma alteração automática em RDO, cronograma,
+pendências ou ações. Qualquer interpretação, proposta de mudança ou execução
+sensível continua sujeita às regras dos agentes, à validação de política e à
+aprovação humana aplicável.
+
+Com essas evidências, o MVP 0.8E está concluído e validado.
