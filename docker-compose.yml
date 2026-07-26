@@ -38,6 +38,76 @@ services:
       timeout: 5s
       retries: 10
 
+  mariadb:
+    image: mariadb:10.6
+    restart: unless-stopped
+    environment:
+      MARIADB_ROOT_PASSWORD: ${MARIADB_ROOT_PASSWORD}
+      MARIADB_DATABASE: ${ERP_DB_NAME}
+      MARIADB_USER: ${ERP_DB_USER}
+      MARIADB_PASSWORD: ${ERP_DB_PASS}
+    volumes:
+      - mariadb_data:/var/lib/mysql
+    networks:
+      - private
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost"]
+      interval: 10s
+      timeout: 5s
+      retries: 15
+
+  # =========================
+  # PROJETO / OBRA
+  # =========================
+  openproject_db:
+    image: postgres:17-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${OPENPROJECT_DB_NAME}
+      POSTGRES_USER: ${OPENPROJECT_DB_USER}
+      POSTGRES_PASSWORD: ${OPENPROJECT_DB_PASSWORD}
+    volumes:
+      - openproject_pgdata:/var/lib/postgresql/data
+    networks:
+      private:
+        aliases:
+          - openproject-db
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "pg_isready -U ${OPENPROJECT_DB_USER} -d ${OPENPROJECT_DB_NAME}",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 15
+      start_period: 20s
+
+  openproject:
+    image: openproject/openproject:17.6.0
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:8081:80"
+    environment:
+      DATABASE_URL: "postgres://${OPENPROJECT_DB_USER}:${OPENPROJECT_DB_PASSWORD}@openproject-db:5432/${OPENPROJECT_DB_NAME}"
+
+      SECRET_KEY_BASE: ${OPENPROJECT_SECRET_KEY_BASE}
+
+      OPENPROJECT_HOST__NAME: ${OPENPROJECT_HOST_NAME:-localhost:8081}
+      OPENPROJECT_HTTPS: "${OPENPROJECT_HTTPS:-false}"
+
+      OPENPROJECT_DEFAULT__LANGUAGE: pt-BR
+      TZ: America/Sao_Paulo
+    depends_on:
+      openproject_db:
+        condition: service_healthy
+    volumes:
+      - openproject_assets:/var/openproject/assets
+    networks:
+      - private
+    labels:
+      - traefik.enable=false
+
   redis:
     image: redis:7-alpine
     restart: unless-stopped
@@ -147,7 +217,11 @@ services:
       - traefik.http.routers.api.entrypoints=web
       - traefik.http.services.api.loadbalancer.server.port=8000
     healthcheck:
-      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:8000/status/health')\" || exit 1"]
+      test:
+        [
+          "CMD-SHELL",
+          'python -c "import urllib.request; urllib.request.urlopen(''http://localhost:8000/status/health'')" || exit 1',
+        ]
       interval: 20s
       timeout: 5s
       retries: 5
@@ -320,6 +394,9 @@ volumes:
   minio_data:
   grafana_data:
   evolution_data:
+  mariadb_data:
+  openproject_assets:
+  openproject_pgdata:
 
 networks:
   public:
