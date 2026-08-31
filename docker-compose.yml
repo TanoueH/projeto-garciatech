@@ -94,6 +94,7 @@ services:
       SECRET_KEY_BASE: ${OPENPROJECT_SECRET_KEY_BASE}
 
       OPENPROJECT_HOST__NAME: ${OPENPROJECT_HOST_NAME:-localhost:8081}
+      OPENPROJECT_ADDITIONAL__HOST__NAMES: '["openproject"]'
       OPENPROJECT_HTTPS: "${OPENPROJECT_HTTPS:-false}"
 
       OPENPROJECT_DEFAULT__LANGUAGE: pt-BR
@@ -369,6 +370,33 @@ services:
       - traefik.http.routers.grafana.entrypoints=web
       - traefik.http.services.grafana.loadbalancer.server.port=3000
 
+  openclaw:
+    image: ghcr.io/openclaw/openclaw:latest
+    container_name: openclaw
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:18789:18789"
+    environment:
+      - HOME=/home/node
+
+      - OPENCLAW_STATE_DIR=/home/node/.openclaw
+      - OPENCLAW_CONFIG_DIR=/home/node/.openclaw
+      - OPENCLAW_GATEWAY_BIND=lan
+      - OPENCLAW_GATEWAY_TOKEN=${OPENCLAW_GATEWAY_TOKEN}
+      - GEMINI_API_KEY=${GEMINI_API_KEY:-}
+      - OPENAI_API_KEY=${OPENAI_API_KEY:-}
+      - SILICONFLOW_API_KEY=${SILICONFLOW_API_KEY:-}
+      - TZ=America/Sao_Paulo
+    volumes:
+      - openclaw_data:/home/node/.openclaw
+    networks:
+      - private
+    labels:
+      - traefik.enable=true
+      - traefik.docker.network=obra_caio_private
+      - traefik.http.routers.openclaw.rule=Host(`openclaw.localhost`)
+      - traefik.http.routers.openclaw.entrypoints=web
+      - traefik.http.services.openclaw.loadbalancer.server.port=18789
   dashboard:
     image: nginx:1.27-alpine
     container_name: construction_dashboard
@@ -397,6 +425,10 @@ volumes:
   mariadb_data:
   openproject_assets:
   openproject_pgdata:
+
+  openclaw_data:
+    external: true
+    name: projeto-garcia_openclaw_data
 
 networks:
   public:

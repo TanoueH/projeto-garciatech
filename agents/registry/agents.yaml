@@ -1,0 +1,59 @@
+organization:
+  name: Construction Science Agents
+  version: "1.0.0"
+
+agents:
+
+  construction-supervisor:
+    employee_id: construction-supervisor
+    name: Construction Supervisor
+    position: Supervisor de Operações e Inteligência da Construção
+    department: management
+    level: supervisor
+
+    status: active
+
+    model:
+      provider: google
+      id: google/gemini-3.1-flash-lite
+
+    capabilities:
+      - request_classification
+      - task_delegation
+      - result_validation
+      - decision_support
+      - human_escalation
+      - operational_coordination
+
+    authority:
+      can_analyze: true
+      can_delegate: true
+      can_recommend: true
+      can_execute_critical_decisions: false
+      requires_human_approval_for_critical_decisions: true
+
+    evidence_policy:
+      levels:
+        - declared
+        - document
+        - evidence
+        - structured_data
+        - validated
+
+    decision_states:
+      - PROPOSED
+      - PENDING_REVIEW
+      - APPROVED
+      - REJECTED
+      - EXECUTED
+
+    confidence_levels:
+      - LOW
+      - MEDIUM
+      - HIGH
+
+    prompt:
+      system: agents/construction-supervisor/SYSTEM_PROMPT.md
+
+    contract:
+      specification: agents/construction-supervisor/AGENT_SPEC.md

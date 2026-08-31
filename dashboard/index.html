@@ -173,8 +173,8 @@
 <header>
   <h1>Construction Science Agents Dev Dashboard</h1>
   <p class="subtitle">
-    Painel local do MVP <strong>Obra-Caio Control Tower</strong>.<br>
-    Stack atual: n8n + api_core + agent_worker + PostgreSQL + Redis + Evolution API + MinIO + Grafana + Traefik.
+    Painel local do MVP <strong>Control Tower - Garcia Engenharia e Tecnologia</strong>.<br>
+    Stack atual: n8n + api_core + agent_worker + PostgreSQL + Redis + Evolution API + MinIO + Grafana + Traefik + OpenClaw.
   </p>
 </header>
 
@@ -236,11 +236,11 @@
 
   <div class="grid">
 
-    <a class="card" href="http://127.0.0.1:8081" target="_blank">
+    <a class="card" href="http://localhost:8081" target="_blank">
       <div class="icon" style="background-image:url('./icons/openproject.png');"></div>
       <div class="content">
         <h3>OpenProject</h3>
-        <p>http://127.0.0.1:8081/</p>
+        <p>http://localhost:8081/</p>
         <span class="badge">Project Manager</span>
       </div>
     </a>
@@ -263,15 +263,6 @@
       </div>
     </a>
 
-    <a class="card disabled" href="#" onclick="return false;">
-      <div class="icon" style="background-image:url('./icons/postgres.png');"></div>
-      <div class="content">
-        <h3>PostgreSQL</h3>
-        <p>Host: 127.0.0.1 | Porta: 15432 | Usar DBeaver</p>
-        <span class="badge badge-dev">Banco de dados</span>
-      </div>
-    </a>
-
   </div>
 </section>
 
@@ -279,6 +270,15 @@
   <div class="section-title">Infraestrutura e workers</div>
 
   <div class="grid">
+
+    <a class="card" href="http://localhost:18789" target="_blank">
+      <div class="icon" style="background-image:url('./icons/openclaw.png');"></div>
+      <div class="content">
+        <h3>OpenClaw</h3>
+        <p>Host: http://localhost:18789/</p>
+        <span class="badge">AI</span>
+      </div>
+    </a>
 
     <a class="card disabled" href="#" onclick="return false;">
       <div class="icon" style="background-image:url('./icons/agent.png');"></div>
